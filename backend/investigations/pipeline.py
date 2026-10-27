@@ -1,3 +1,5 @@
+from .models import BugReport
+
 def run_investigation(bug_report_id:int)->dict:
     """
     coordinate an investingation from bug report to pull request.
@@ -25,10 +27,21 @@ def run_investigation(bug_report_id:int)->dict:
     
     
     
-def load_bug_report(bug_report_id:int):
-    raise NotImplementedError("loading bug is not implemented yet")
-def prepare_investigation_task(bug_report:dict):    
-    raise NotImplementedError("preparing investigation task is not implemented yet")
+def load_bug_report(bug_report_id:int)->BugReport:
+    return BugReport.objects.get(pk=bug_report_id)
+
+def prepare_investigation_task(report:BugReport)->dict:    
+    return{
+        "bug_report_id":report.pk,
+        "issue_key":f"BUG-{report.pk}",
+        "title":report.title,
+        "description":report.description,
+        "expected_behaviour":report.expected_bahaviour,
+        "reproduction_steps":report.reproduction_steps,
+        "error_details": report.error_details,
+        "repository_url": report.repository_url or None,
+        
+    }
 def select_repository(task):
     raise NotImplementedError("selecting repository is not implemented yet")
 def prepare_workspace(task):
