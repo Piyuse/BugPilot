@@ -1,5 +1,9 @@
-from .models import BugReport
+from .models import BugReport,Repository
+from .repository_urls import normalize_repository_url
 
+class RepositorySelectionError(Exception):
+    """The task could not be matched to an eligible repository."""
+    
 def run_investigation(bug_report_id:int)->dict:
     """
     coordinate an investingation from bug report to pull request.
@@ -43,7 +47,25 @@ def prepare_investigation_task(report:BugReport)->dict:
         
     }
 def select_repository(task):
-    raise NotImplementedError("selecting repository is not implemented yet")
+    supplied_url=task.get("repository_url")
+    
+    if not supplied_url:
+        raise RepositorySelectionError(
+            "Provide a repository URL.Automatic discovery is not implemented yet"
+        )
+    try:
+        normalized_url=normalize_repository_url(supplied_url)
+    except ValueError as error:
+        raise RepositorySelectionError(str(error))from error
+    
+    repository=Repository.objects.filter(url=normalized_url,is_active=True).first()
+    if repository is None:
+        raise RepositorySelectionError(
+            "The repository is not registered or is inactive"
+        )
+    
+    return repository
+    
 def prepare_workspace(task):
     raise NotImplementedError("preparing workspace is not implemented yet")
 def investigate_and_fix(task,workspace):
