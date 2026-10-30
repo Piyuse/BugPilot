@@ -35,6 +35,8 @@ class Repository(models.Model):
 
     class Meta:
         ordering = ["name"]
+        verbose_name="repository"
+        verbose_name_plural="repositories"
 
     def clean(self):
         super().clean()
