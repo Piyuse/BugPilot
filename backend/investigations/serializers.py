@@ -140,7 +140,7 @@ class InvestigationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Investigation
         fields = ["id", "issue_source", "source_repository_url", "source_issue_number", "issue_key", "issue_url", "title", "requested_repository", "repository", "mode", "status", "stage",
-                  "selection_reason", "branch", "base_branch", "pull_request_url", "issue_linked", "issue_comment_id", "issue_comment_url", "model_calls", "error", "attempt",
+                  "selection_reason", "branch", "base_branch", "publication_repository_url", "publication_head_owner", "pull_request_url", "issue_linked", "issue_comment_id", "issue_comment_url", "model_calls", "error", "attempt",
                   "created_at", "updated_at", "finished_at"]
         read_only_fields = fields
 

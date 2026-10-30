@@ -17,7 +17,9 @@ from .repository_urls import normalize_repository_url
 
 
 class IntegrationError(Exception):
-    pass
+    def __init__(self, message, *, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -105,7 +107,7 @@ def request_json(method, url, *, headers=None, payload=None, retries=0, retry_ba
                     on_retry(f"Provider returned HTTP {code}. Retrying request {attempt + 2}/{retries + 1} in {delay:.1f}s.")
                 time.sleep(delay)
                 continue
-            raise IntegrationError(http_error_message(urlsplit(url).hostname, code, attempt + 1)) from None
+            raise IntegrationError(http_error_message(urlsplit(url).hostname, code, attempt + 1), status_code=code) from None
         except (URLError, TimeoutError, OSError):
             if attempt < retries:
                 delay = retry_delay(attempt, None, retry_base_delay)
@@ -388,16 +390,79 @@ class GitHubClient:
                 readme = base64.b64decode(content.get("content", "")).decode("utf-8", errors="replace")[:10000]
         return {"id": repository.pk, "name": repository.name, "description": repository.description, "paths": paths, "readme": readme}
 
-    def existing_pull_request(self, repository, branch):
+    def publication_target(self, repository):
+        """Use upstream write access or create/reuse a verified fork for this user."""
+        upstream = self.call("GET", f"/repos/{self.slug(repository)}")
+        if upstream.get("permissions", {}).get("push") is True:
+            return {"url": repository.url, "head_owner": self.slug(repository).split("/")[0]}
+        user = self.call("GET", "/user").get("login", "")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", user):
+            raise IntegrationError("GitHub did not return a usable account login for fork publishing.")
+        name = self.slug(repository).split("/")[1]
+        try:
+            fork = self.call("GET", f"/repos/{user}/{name}")
+        except IntegrationError as error:
+            if error.status_code != 404:
+                raise
+            try:
+                fork = self.call("POST", f"/repos/{self.slug(repository)}/forks", {"default_branch_only": True})
+            except IntegrationError as create_error:
+                # The creation may have succeeded even if its response was lost.
+                try:
+                    fork = self.call("GET", f"/repos/{user}/{name}")
+                except IntegrationError:
+                    raise IntegrationError(f"Could not create or access your fork of {self.slug(repository)}. Check that GITHUB_TOKEN can create repositories and write Contents in your fork. {create_error}") from None
+        full_name = fork.get("full_name", "")
+        try:
+            url = normalize_repository_url("https://github.com/" + full_name)
+        except (ValueError, TypeError):
+            raise IntegrationError("GitHub returned an invalid fork destination.") from None
+        # Some create responses omit parent/source; verify the full repository record.
+        if not fork.get("parent") and not fork.get("source"):
+            fork = self.call("GET", f"/repos/{full_name}")
+        network = (upstream.get("source") or {}).get("id") or upstream.get("id")
+        if not isinstance(network, int) or isinstance(network, bool) or network <= 0:
+            raise IntegrationError("GitHub did not return the selected repository's fork network identity.")
+        if (not fork.get("fork") or fork.get("owner", {}).get("login", "").lower() != user.lower()
+                or full_name.split("/")[0].lower() != user.lower()
+                or network not in {fork.get("parent", {}).get("id"), fork.get("source", {}).get("id")}):
+            raise IntegrationError("The repository in your account is not a fork in the selected repository's network. No code was pushed.")
+        if fork.get("permissions", {}).get("push") is False:
+            raise IntegrationError("GITHUB_TOKEN cannot push to your fork. Grant Contents read/write access to that fork before retrying.")
+        # Fork creation is asynchronous; wait for its default ref before pushing.
+        branch = fork.get("default_branch")
+        if not isinstance(branch, str) or not branch:
+            raise IntegrationError("GitHub has not initialized the fork's default branch yet. Retry publication shortly.")
+        for attempt in range(15):
+            try:
+                self.call("GET", f"/repos/{full_name}/git/ref/heads/{quote(branch, safe='')}")
+                return {"url": url, "head_owner": user}
+            except IntegrationError as error:
+                if error.status_code not in {404, 409}:
+                    raise
+                if attempt < 14:
+                    time.sleep(2)
+        raise IntegrationError("GitHub is still preparing your fork. Retry publication shortly; no new coding run is needed.")
+
+    def existing_pull_request(self, repository, branch, *, head_owner=None):
         slug = self.slug(repository)
         # Recover the branch's PR even if the repository default changed later.
-        query = urlencode({"state": "all", "head": f"{slug.split('/')[0]}:{branch}"})
+        query = urlencode({"state": "all", "head": f"{head_owner or slug.split('/')[0]}:{branch}"})
         pulls = self.call("GET", f"/repos/{slug}/pulls?{query}")
         return pulls[0] if pulls else None
 
-    def create_pull_request(self, repository, branch, title, body, *, base_branch=None):
-        existing = self.existing_pull_request(repository, branch)
-        return existing or self.call("POST", f"/repos/{self.slug(repository)}/pulls", {
-            "title": title[:250], "head": branch, "base": base_branch or self.default_branch(repository),
+    def create_pull_request(self, repository, branch, title, body, *, base_branch=None, head_owner=None):
+        existing = self.existing_pull_request(repository, branch, head_owner=head_owner)
+        if existing:
+            return existing
+        payload = {
+            "title": title[:250], "head": f"{head_owner}:{branch}" if head_owner else branch, "base": base_branch or self.default_branch(repository),
             "body": body, "draft": False, "maintainer_can_modify": True,
-        })
+        }
+        try:
+            return self.call("POST", f"/repos/{self.slug(repository)}/pulls", payload)
+        except IntegrationError:
+            existing = self.existing_pull_request(repository, branch, head_owner=head_owner)
+            if existing:
+                return existing
+            raise

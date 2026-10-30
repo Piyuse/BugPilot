@@ -35,6 +35,8 @@ export interface Investigation {
   selection_reason: string;
   branch: string;
   base_branch: string;
+  publication_repository_url: string;
+  publication_head_owner: string;
   pull_request_url: string;
   issue_linked: boolean;
   issue_comment_id: string;

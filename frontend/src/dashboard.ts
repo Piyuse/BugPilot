@@ -214,6 +214,7 @@ export function mountDashboard(session: Session): void {
     }).join("") + "</ol></div>";
     if (run.repository) content += '<div class="drawer-section"><h2>Affected repository</h2><p>' + icon("repo") + " " + escapeHTML(run.repository.name) + '</p><p class="field-help">' + escapeHTML(run.selection_reason) + "</p>" + (run.branch ? "<p><code>" + escapeHTML(run.branch) + "</code></p>" : "") + "</div>";
     if (run.base_branch) content += '<div class="drawer-section"><h2>Base branch</h2><p><code>' + escapeHTML(run.base_branch) + "</code></p></div>";
+    if (run.publication_repository_url && run.publication_repository_url !== run.repository?.url) content += '<div class="drawer-section"><h2>Fix branch in your fork</h2><p><a href="' + safeURL(run.publication_repository_url) + '" target="_blank" rel="noopener noreferrer">' + escapeHTML(run.publication_repository_url.replace("https://github.com/", "")) + ' ↗</a></p><p><code>' + escapeHTML(run.publication_head_owner + ":" + run.branch) + '</code></p><p class="field-help">The pull request targets the affected repository’s recorded base branch.</p></div>';
     if (Object.keys(run.preprocessed).length) {
       content += '<div class="drawer-section"><h2>Structured bug context</h2>';
       for (const [key, label] of [["summary", "Summary"], ["expected_behavior", "Expected behavior"], ["actual_behavior", "Actual behavior"], ["error_details", "Error details"]] as const) {

@@ -518,16 +518,19 @@ class RealGitValidationTests(SimpleTestCase):
         self.run.title = "Fix checkout"
         self.run.issue_url = "https://acme.atlassian.net/browse/PAY-142"
         self.run.proposal = {"summary": "Guard discount", "root_cause": "Missing null guard"}
-        self.run.validation = {"checks": [{"command": ["python", "-m", "pytest"]}]}
+        self.run.validation = {"passed": True, "checks": [{"command": ["python", "-m", "pytest"]}]}
         (self.workspace / "pricing.py").write_text("total = 0\n", encoding="utf-8")
         execution.git(["add", "."], cwd=self.workspace)
         execution.git(["commit", "-m", "existing fix"], cwd=self.workspace)
+        self.run.validation["validated_tree"] = execution.git(["write-tree"], cwd=self.workspace)
+        self.run.save = MagicMock()
         original_git = execution.git
         operations = []
         def intercept(args, **kwargs):
             operations.append(args[0])
             return "" if args[0] == "push" else original_git(args, **kwargs)
         github = MagicMock()
+        github.publication_target.return_value = {"url": self.run.repository.url, "head_owner": "acme"}
         with patch("investigations.execution.git", side_effect=intercept):
             execution.publish_pull_request(self.run, self.workspace, github)
         self.assertNotIn("commit", operations)

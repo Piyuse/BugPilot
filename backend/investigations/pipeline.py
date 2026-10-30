@@ -1,5 +1,6 @@
 """Durable, checkpointed ticket-to-PR orchestration used by the worker."""
 import time
+from pathlib import Path
 
 from django.conf import settings
 from django.utils import timezone
@@ -73,6 +74,15 @@ def fix_branch(run):
     return f"codex/{reference}-{run.pk.hex[:10]}"
 
 
+def publish_validated_fix(run, workspace, github):
+    run.publication_attempt = run.publication_attempt or run.attempt
+    run.save(update_fields=["publication_attempt", "updated_at"])
+    stage(run, "publishing", "Checks passed. Publishing the fix branch to an accessible repository and opening a PR against the original repository.")
+    pull_request = execution.publish_pull_request(run, workspace, github)
+    run.pull_request_url = pull_request["html_url"]
+    run.save(update_fields=["pull_request_url", "updated_at"])
+
+
 def run_live(run):
     jira = JiraClient() if run.issue_source == "jira" else None
     if not run.branch:
@@ -82,10 +92,28 @@ def run_live(run):
     github = None
     if not run.pull_request_url and run.repository_id:
         github = GitHubClient()
-        existing = github.existing_pull_request(run.repository, run.branch)
+        existing = github.existing_pull_request(run.repository, run.branch, head_owner=run.publication_head_owner or None)
         if existing:
             run.pull_request_url = existing["html_url"]
             run.save(update_fields=["pull_request_url", "updated_at"])
+
+    if not run.pull_request_url and run.publication_attempt:
+        if not run.repository_id or not run.base_sha:
+            raise IntegrationError("The publication checkpoint has no validated fix. No code was pushed.")
+        workspace = Path(settings.BUGPILOT_WORKSPACE_ROOT) / str(run.pk) / f"attempt-{run.publication_attempt}"
+        if not workspace.is_dir():
+            raise IntegrationError("The validated publication workspace is missing. Restore it before retrying; no new model run was started.")
+        stage(run, "validating", "Recovering the existing fix and rechecking its source and tests before retrying publication.")
+        try:
+            run.validation = execution.validate_proposal(run, workspace)
+            if run.validation.get("passed") is not True:
+                raise IntegrationError("The recovered fix did not pass validation. No code was pushed.")
+        except IntegrationError as error:
+            run.validation = {"passed": False, "reason": execution.redact(str(error))}
+            run.save(update_fields=["validation", "updated_at"])
+            raise
+        run.save(update_fields=["validation", "updated_at"])
+        publish_validated_fix(run, workspace, github)
 
     if not run.pull_request_url:
         missing = missing_live_settings(run.issue_source)
@@ -142,10 +170,7 @@ def run_live(run):
             run.save(update_fields=["validation", "updated_at"])
             raise
         run.save(update_fields=["validation", "updated_at"])
-        stage(run, "publishing", "Checks passed. Publishing the fix branch and creating a pull request.")
-        pull_request = execution.publish_pull_request(run, workspace, github)
-        run.pull_request_url = pull_request["html_url"]
-        run.save(update_fields=["pull_request_url", "updated_at"])
+        publish_validated_fix(run, workspace, github)
 
     if not run.issue_comment_id:
         stage(run, "linking_issue", f"Posting the PR link as a comment on the original {run.issue_source.title()} issue; existing comments are recovered on retry.")
