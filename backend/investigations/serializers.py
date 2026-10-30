@@ -36,6 +36,7 @@ class BugReportSerializer(serializers.ModelSerializer):
 
 class RepositorySerializer(serializers.ModelSerializer):
     is_demo = serializers.BooleanField(read_only=True)
+    runtime_image = serializers.CharField(max_length=200, allow_blank=True, required=False)
     class Meta:
         model = Repository
         fields = ["id", "name", "url", "default_branch", "description", "is_active", "is_demo", "validation_commands", "runtime_image", "created_at"]
@@ -63,12 +64,19 @@ class RepositorySerializer(serializers.ModelSerializer):
         return normalized
 
     def validate_runtime_image(self, value):
-        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/:@-]*", value):
+        if value and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/:@-]*", value):
             raise serializers.ValidationError("Use a Docker image name or digest.")
         return value
 
     def validate_validation_commands(self, value):
         return validate_commands(value)
+
+    def validate(self, attrs):
+        commands = attrs.get("validation_commands", self.instance.validation_commands if self.instance else [])
+        image = attrs.get("runtime_image", self.instance.runtime_image if self.instance else "")
+        if commands and not image:
+            raise serializers.ValidationError({"runtime_image": "Provide a prepared Docker image for custom checks, or leave commands empty for automatic detection."})
+        return attrs
 
 
 class SubmissionSerializer(serializers.Serializer):

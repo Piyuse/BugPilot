@@ -249,7 +249,7 @@ class QueueAndPipelineTests(TestCase):
         self.assertEqual(run.pull_request_url, "")
         self.assertFalse(run.issue_linked)
         self.assertTrue(run.validation["simulated"])
-        self.assertEqual(run.events.count(), 9)
+        self.assertEqual(run.events.count(), 10)
         jira.assert_not_called()
         openai.assert_not_called()
         github.assert_not_called()

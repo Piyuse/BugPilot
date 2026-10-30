@@ -20,7 +20,7 @@ export function mountDashboard(session: Session): void {
   const icon = (name: string): string => '<svg aria-hidden="true"><use href="#i-' + name + '"/></svg>';
   const state: DashboardState = { overview: null, mode: session.mode, submitting: false, repositories: [], page: "overview", listPage: 1, selected: null, selectedUpdated: null, refreshing: false, opener: null };
   const labels: Record<Status, string> = { queued: "Queued", running: "In progress", pr_created: "Ready for review", needs_attention: "Needs attention" };
-  const stageLabels: Record<string, string> = { fetching_ticket: "Reading ticket", preprocessing: "Preparing context", selecting_repository: "Finding repository", preparing_workspace: "Creating branch", fixing: "Investigating & fixing", validating: "Running checks", publishing: "Creating PR", linking_issue: "Commenting on GitHub issue", linking_jira: "Posting legacy issue comment", completed: "Completed", queued: "Waiting for worker" };
+  const stageLabels: Record<string, string> = { fetching_ticket: "Reading ticket", preprocessing: "Preparing context", selecting_repository: "Finding repository", preparing_workspace: "Creating branch", preparing_validation: "Preparing test environment", fixing: "Investigating & fixing", validating: "Running checks", publishing: "Creating PR", linking_issue: "Commenting on GitHub issue", linking_jira: "Posting legacy issue comment", completed: "Completed", queued: "Waiting for worker" };
 
   function safeURL(value: string): string {
     try { const url = new URL(value); return url.protocol === "https:" ? escapeHTML(url.href) : "#"; } catch { return "#"; }
@@ -80,10 +80,9 @@ export function mountDashboard(session: Session): void {
       ? ["Missing backend credentials: " + config.missing.join(", ") + ". Add them to backend/.env, then restart the backend and worker."]
       : [];
     const hint = repositoryHint();
-    if ((hint.value || !state.repositories.some(repo => repo.is_active && !repo.is_demo)) && !hint.match) issues.push("The affected repository is not registered. Configure its default branch, test image and validation commands in Repositories.");
+    if ((hint.value || !state.repositories.some(repo => repo.is_active && !repo.is_demo)) && !hint.match) issues.push("The affected repository is not registered. Add its name and GitHub URL in Repositories.");
     else if (hint.match && !hint.match.is_active) issues.push("The selected repository is inactive. Enable it in Repositories.");
     else if (hint.match?.is_demo) issues.push("This repository is a demo fixture. Select Demo mode or use a real repository.");
-    else if (hint.match && !hint.match.validation_commands.length) issues.push("The selected repository has no validation commands. Configure its test image and checks in Repositories.");
     return issues;
   }
   function syncSubmissionGuidance(): void {
@@ -140,7 +139,7 @@ export function mountDashboard(session: Session): void {
       '<option value="' + escapeHTML(repo.url) + '" label="' + escapeHTML(repo.name) + '"></option>' +
       '<option value="' + escapeHTML(repo.name) + '" label="' + escapeHTML(repo.url) + '"></option>'
     ).join("");
-    $("#repository-cards").innerHTML = repositories.length ? repositories.map((repo) => '<article class="panel repo-card"><div class="card-top">' + icon("repo") + '<span class="badge ' + (repo.is_active ? "pr_created" : "") + '">' + (repo.is_demo ? "Demo fixture" : repo.is_active ? "Active" : "Inactive") + "</span></div><h3>" + escapeHTML(repo.name) + '</h3><p><a href="' + safeURL(repo.url) + '" target="_blank" rel="noopener noreferrer">' + escapeHTML(repo.url.replace("https://github.com/", "")) + ' ↗</a></p><p class="repo-description">' + escapeHTML(repo.description || "Add a description to improve repository discovery.") + '</p><div class="repo-meta"><span>⑂ ' + escapeHTML(repo.default_branch || "Default branch · automatic") + "</span><span>" + repo.validation_commands.length + " validation " + (repo.validation_commands.length === 1 ? "command" : "commands") + '</span><span>' + escapeHTML(repo.runtime_image) + '</span></div><div class="repo-actions">' + (state.overview?.can_manage ? '<button class="text-button" data-edit-repo="' + repo.id + '">Edit configuration ' + icon("arrow") + "</button>" : "") + "</div></article>").join("") : '<div class="panel empty-state">' + icon("repo") + "<h3>Give BugPilot a place to start</h3><p>Register your team's repositories, or run seed_demo to explore sample services.</p></div>";
+    $("#repository-cards").innerHTML = repositories.length ? repositories.map((repo) => '<article class="panel repo-card"><div class="card-top">' + icon("repo") + '<span class="badge ' + (repo.is_active ? "pr_created" : "") + '">' + (repo.is_demo ? "Demo fixture" : repo.is_active ? "Active" : "Inactive") + "</span></div><h3>" + escapeHTML(repo.name) + '</h3><p><a href="' + safeURL(repo.url) + '" target="_blank" rel="noopener noreferrer">' + escapeHTML(repo.url.replace("https://github.com/", "")) + ' ↗</a></p><p class="repo-description">' + escapeHTML(repo.description || "Add a description to improve repository discovery.") + '</p><div class="repo-meta"><span>⑂ ' + escapeHTML(repo.default_branch || "Default branch · automatic") + "</span><span>" + (repo.validation_commands.length ? repo.validation_commands.length + " validation " + (repo.validation_commands.length === 1 ? "command" : "commands") : "Tests · automatic detection") + '</span><span>' + escapeHTML(repo.validation_commands.length ? repo.runtime_image : "Runtime · prepared automatically") + '</span></div><div class="repo-actions">' + (state.overview?.can_manage ? '<button class="text-button" data-edit-repo="' + repo.id + '">Edit configuration ' + icon("arrow") + "</button>" : "") + "</div></article>").join("") : '<div class="panel empty-state">' + icon("repo") + "<h3>Give BugPilot a place to start</h3><p>Register your team's repositories, or run seed_demo to explore sample services.</p></div>";
     syncSubmissionGuidance();
   }
   async function loadList() {
@@ -249,9 +248,9 @@ export function mountDashboard(session: Session): void {
     $("#repo-name").value = repo?.name || prefillName;
     $("#repo-url").value = repo?.url || prefillURL;
     $("#repo-branch").value = repo?.default_branch || "";
-    $("#repo-image").value = repo?.runtime_image || (prefillURL ? "" : "python:3.12-slim");
+    $("#repo-image").value = repo?.validation_commands.length ? repo.runtime_image : "";
     $("#repo-description").value = repo?.description || "";
-    $("#repo-commands").value = JSON.stringify(repo?.validation_commands || (prefillURL ? [] : [["python", "-m", "pytest"]]), null, 2);
+    $("#repo-commands").value = JSON.stringify(repo?.validation_commands || [], null, 2);
     $("#repo-active").checked = repo?.is_active ?? true;
     $("#repository-dialog").showModal();
   }
@@ -353,7 +352,7 @@ export function mountDashboard(session: Session): void {
     $("#save-repository").disabled = true;
     try {
       let commands: unknown;
-      try { commands = JSON.parse($("#repo-commands").value); } catch { throw new Error("Validation commands must be valid JSON argument arrays."); }
+      try { commands = JSON.parse($("#repo-commands").value.trim() || "[]"); } catch { throw new Error("Validation commands must be valid JSON argument arrays."); }
       const id = $("#repo-id").value;
       await api("repositories/" + (id ? id + "/" : ""), { method: id ? "PATCH" : "POST", body: JSON.stringify({
         name: $("#repo-name").value.trim(), url: $("#repo-url").value.trim(),

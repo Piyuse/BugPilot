@@ -1,5 +1,6 @@
 """Execute the agent and trusted repository checks with bounded subprocesses."""
 import base64
+from contextlib import ExitStack
 import json
 import os
 import signal
@@ -39,12 +40,14 @@ def command(argv, *, cwd=None, env=None, timeout=120, stdin=None, operation=None
     # File-backed output avoids buffering unbounded agent/test logs in memory.
     output_root = Path(settings.BUGPILOT_WORKSPACE_ROOT) / ".process-logs"
     output_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryFile(dir=output_root) as output:
+    with ExitStack() as stack:
+        output = stack.enter_context(tempfile.TemporaryFile(dir=output_root))
+        input_file = stack.enter_context(stdin.open("rb")) if isinstance(stdin, Path) else None
         try:
-            process = subprocess.Popen(argv, cwd=cwd, env=env or clean_environment(), stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            process = subprocess.Popen(argv, cwd=cwd, env=env or clean_environment(), stdin=input_file if input_file is not None else subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
                                        stdout=output, stderr=subprocess.STDOUT, **creation)
             try:
-                process.communicate(input=stdin.encode() if stdin is not None else None, timeout=timeout)
+                process.communicate(input=stdin.encode() if isinstance(stdin, str) else None, timeout=timeout)
             except subprocess.TimeoutExpired:
                 if os.name == "nt":
                     subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)

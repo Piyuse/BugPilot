@@ -82,7 +82,7 @@ The GitHub token needs **Issues, Contents and Pull Requests read/write** for the
 
 Install the [Codex CLI](https://developers.openai.com/codex/cli/) and Docker on the worker host. Confirm `git --version`, `codex --version`, and `docker info` work for its OS user. Set `CODEX_BIN` if the executable is not on PATH; on Windows use a directly executable `codex.exe`, rather than an npm `.cmd` shim.
 
-Docker Desktop must be running with its Linux engine, not merely installed. BugPilot checks the engine before model calls, and checks the selected Linux test image before checkout/coding and again before regression checks. Test images must already exist locally; validation uses `--pull never`. A missing `dockerDesktopLinuxEngine` pipe means the Linux engine is unavailable, not that the repository's tests failed. Start Docker Desktop (`docker desktop start`) and wait for `docker info` to report a running Linux server.
+Docker Desktop must be running with its Linux engine, not merely installed. BugPilot checks the engine before model calls. With automatic validation it prepares a dependency image after checkout and before coding; with custom checks it verifies the configured image locally before checkout. Regression checks always use `--pull never`. A missing `dockerDesktopLinuxEngine` pipe means the Linux engine is unavailable, not that the repository's tests failed. Start Docker Desktop (`docker desktop start`) and wait for `docker info` to report a running Linux server.
 
 `OPENAI_PREPROCESS_MODEL` defaults to `gpt-6-luna`, a lower-cost model for structured preprocessing and repository selection. Choose a Responses API model with Structured Outputs available to your account. `OPENAI_API_KEY` and `CODEX_API_KEY` fall back to each other, so an existing coding API key also works for preprocessing. `CODEX_MODEL` is optional; leaving it blank uses the CLI default. Use API model IDs (for example, `gpt-6.1-sol`), not display labels. The integration uses `codex exec`, a disposable `CODEX_HOME`, structured output, and the `workspace-write` sandbox.
 
@@ -106,10 +106,15 @@ Admins add/edit repositories through the dashboard; other signed-in developers c
 
 - A unique name and HTTPS GitHub URL. BugPilot detects the default branch from GitHub automatically.
 - An ownership description for repository discovery.
-- A prebuilt Docker image containing the language runtime, `sh`, `cp`, and dependencies.
-- Validation commands as JSON argument arrays.
+- Optional custom Docker image and validation commands as JSON argument arrays. Leave commands empty (`[]`) for automatic setup.
 
-Example:
+Automatic validation detects root Node.js `package.json` test scripts (npm, pnpm or Yarn) and Python projects (pytest). BugPilot builds a Linux dependency image before calling the coding agent, then runs the detected tests offline against the proposed fix. It respects Node lockfiles and pinned package-manager versions, installs Python requirement files and project test extras, and recognizes literal pip dependencies in CI for mixed Node/Python tests. Image preparation can access package registries; no BugPilot API credentials or untracked files enter the build context. Secret files are excluded from tracked source too. Images are cached by repository, Git revision and build recipe, and refreshed when that revision changes. `BUGPILOT_VALIDATION_SETUP_TIMEOUT` controls preparation (default 1200 seconds).
+
+If no supported test setup exists, detection stops with an actionable error; tests are never silently skipped. Other languages, nested project layouts, private dependency registries, browser/native toolchains and complex monorepos may need a custom prepared image and checks. Existing custom configurations remain in use.
+
+The timeline reports dependency setup as **Prepare test environment**, separately from creating the fix branch. Docker Desktop Resource Saver can stop/wake the engine between a successful `docker info` check and a build. BugPilot checks builder readiness immediately before building and retries recognized transport disconnections up to three times, reusing cached layers within one setup timeout. Dependency-install, Dockerfile, permission and test failures are not automatically replayed. It does not restart Docker Desktop or change Resource Saver settings.
+
+Example custom configuration:
 
 ```json
 {
@@ -121,7 +126,7 @@ Example:
 }
 ```
 
-Build/pull the image beforehand. Checks have no network, a read-only root filesystem, dropped capabilities and resource limits. Each command executes in a fresh writable copy of the checkout. Commands cannot share filesystem changes; combine setup steps in a repository test script. Preinstall dependencies in the image. See `docs/test-runtime.Dockerfile` for Python or `docs/nextjs-validation.md` for the prepared Next.js runtime. Each check uses a fresh Docker-managed workspace volume so image-provided Node dependencies remain available; the read-only source mount overlays the proposed patch. Set `BUGPILOT_TEST_MEMORY` for larger repositories (default `2g`).
+Build/pull custom images beforehand. Checks have no network, a read-only root filesystem, dropped capabilities and resource limits. Each command executes in a fresh writable copy of the checkout. Commands cannot share filesystem changes; combine setup steps in a repository test script. Preinstall dependencies in the image. See `docs/test-runtime.Dockerfile` for Python or `docs/nextjs-validation.md` for the prepared Next.js runtime. Each check uses a fresh Docker-managed workspace volume so image-provided Node dependencies remain available; the read-only source mount overlays the proposed patch. Set `BUGPILOT_TEST_MEMORY` for larger repositories (default `2g`).
 
 The registry's `default_branch` is a read-only cache, not a branch override. Each live investigation resolves GitHub's current default branch and records it as `base_branch`. Checkout, the coding brief and the pull request target use that same recorded branch across retries. If a retry selects another repository, BugPilot resolves its default branch afresh. Repository discovery also reads the default branch from GitHub; it never guesses `main`.
 
@@ -132,7 +137,7 @@ Other examples: `["npm", "test", "--", "--runInBand"]`, `["go", "test", "./..."]
 1. Read the GitHub issue and retain only its title, body, labels and canonical URL. Profiles, assignees, reactions and timelines are not retained or sent to OpenAI.
 2. Call OpenAI with bounded input and an enforced JSON schema to extract symptoms, expected behavior, reproduction steps, exact errors and search keywords.
 3. Select the supplied registered repository, infer it from the issue URL, or discover it from the registry.
-4. Clone into a per-attempt checkout and create `codex/gh-<issue-number>-<run-id>`.
+4. Clone into a per-attempt checkout and create `codex/gh-<issue-number>-<run-id>`. When no custom checks exist, detect the test setup and prepare a dependency image before coding.
 5. Give Codex the validated OpenAI brief and repository metadata. Raw issue text is not sent again. Ask it to investigate, implement a minimal fix and add regression coverage.
 6. Reject empty, protected-file, binary or oversized patches, then execute every configured check in Docker.
 7. Commit/push the branch and create a PR with `Fixes owner/repo#123`, the root cause and validation commands.

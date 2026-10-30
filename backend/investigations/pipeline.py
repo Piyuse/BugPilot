@@ -8,6 +8,7 @@ from . import execution
 from .integrations import OpenAIPreprocessor, GitHubClient, IntegrationError, JiraClient
 from .models import Investigation, InvestigationEvent, Repository
 from .configuration import missing_live_settings
+from .validation_setup import automatic_validation, prepare_automatic_validation
 
 
 STAGES = [
@@ -15,6 +16,7 @@ STAGES = [
     ("preprocessing", "Structure bug context"),
     ("selecting_repository", "Locate affected repository"),
     ("preparing_workspace", "Create fix branch"),
+    ("preparing_validation", "Prepare test environment"),
     ("fixing", "Investigate and fix"),
     ("validating", "Run regression checks"),
     ("publishing", "Open pull request"),
@@ -111,11 +113,14 @@ def run_live(run):
             run.repository.default_branch = run.base_branch
             run.repository.save(update_fields=["default_branch"])
         run.save(update_fields=["repository", "selection_reason", "base_branch", "updated_at"])
-        if not run.repository.validation_commands:
-            raise IntegrationError("The selected repository has no validation commands. Configure its test command in Repositories.")
-        execution.ensure_validation_runtime(run.repository)
+        auto_validation = automatic_validation(run.repository)
+        if not auto_validation:
+            execution.ensure_validation_runtime(run.repository)
         stage(run, "preparing_workspace", f"Creating {run.branch} from {run.repository.name}'s default branch, {run.base_branch}.")
         workspace = execution.prepare_workspace(run, on_progress=lambda message: stage(run, "preparing_workspace", message))
+        if auto_validation:
+            stage(run, "preparing_validation", "Detecting tests and preparing their Docker environment before coding.")
+            prepare_automatic_validation(run.repository, workspace, on_progress=lambda message: stage(run, "preparing_validation", message))
         coding_model = settings.CODEX_MODEL or "Codex CLI default"
         stage(run, "fixing", f"Calling Codex ({coding_model}) with the OpenAI-processed brief and repository checkout to diagnose, fix and add regression coverage.")
         initial_head = execution.git(["rev-parse", "HEAD"], cwd=workspace)
