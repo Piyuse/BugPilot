@@ -1,71 +1,149 @@
+import re
+
+from django.conf import settings
+from django.db.models import Q
 from rest_framework import serializers
 
-from .models import BugReport,Repository
+from .models import BugReport, Investigation, InvestigationEvent, Repository
+from .repository_urls import normalize_repository_url, parse_ticket, parse_github_issue
+from .task_context import coding_brief
 
-from .repository_urls import normalize_repository_url
+
+def validate_commands(value):
+    if not isinstance(value, list) or len(value) > 10:
+        raise serializers.ValidationError("Provide at most 10 command argument arrays.")
+    for command in value:
+        if not isinstance(command, list) or not command or len(command) > 50 or any(not isinstance(arg, str) or not arg or len(arg) > 1000 or "\x00" in arg for arg in command):
+            raise serializers.ValidationError('Commands must be argument arrays, for example [["python", "-m", "pytest"]].')
+    return value
+
 
 class BugReportSerializer(serializers.ModelSerializer):
     class Meta:
-        model=BugReport
-        
-        fields=[
-            "id",
-            "title",
-            "description",
-            "expected_behavior",
-            "reproduction_steps",
-            "error_details",
-            "repository_url",
-            "created_at",
-        ]
-        
-        read_only_fields=[
-            "id",
-            "created_at"
-        ]
-        
-        extra_kwargs={
-            "title": {"max_length": 200},
-            "description": {"max_length": 20000},
-            "expected_behavior": {"max_length": 10000},
-            "reproduction_steps": {"max_length": 10000},
-            "error_details": {"max_length": 30000},
-        }
-        
-class RepositorySerializer(serializers.ModelSerializer):
-    class Meta:
-        model=Repository
+        model = BugReport
+        fields = ["id", "title", "description", "expected_behavior", "reproduction_steps", "error_details", "repository_url", "created_at"]
+        read_only_fields = ["id", "created_at"]
+        extra_kwargs = {"description": {"max_length": 30000}}
 
-        fields = [
-            "id",
-            "name",
-            "url",
-            "default_branch",
-            "description",
-            "is_active",
-            "created_at",
-        ]
-
-        read_only_fields = [
-            "id",
-            "created_at",
-        ]
-        
-    def validate_url(self,value):
+    def validate_repository_url(self, value):
+        if not value:
+            return value
         try:
-            normalized_url=normalize_repository_url(value)
+            return normalize_repository_url(value)
         except ValueError as error:
             raise serializers.ValidationError(str(error)) from error
-        
-        
-        existing=Repository.objects.filter(url=normalized_url)
-        
-        if self.instance is not None:
-            existing=existing.exclude(pk=self.instance.pk)
-            
+
+
+class RepositorySerializer(serializers.ModelSerializer):
+    is_demo = serializers.BooleanField(read_only=True)
+    class Meta:
+        model = Repository
+        fields = ["id", "name", "url", "default_branch", "description", "is_active", "is_demo", "validation_commands", "runtime_image", "created_at"]
+        read_only_fields = ["id", "created_at", "default_branch"]
+        extra_kwargs = {"description": {"max_length": 10000}}
+
+    def validate_name(self, value):
+        existing = Repository.objects.filter(name__iexact=value)
+        if self.instance:
+            existing = existing.exclude(pk=self.instance.pk)
         if existing.exists():
-            raise serializers.ValidationError(
-                "This repository is already registered."
-            )
-        
-        return normalized_url
+            raise serializers.ValidationError("A repository with this name is already registered.")
+        return value
+
+    def validate_url(self, value):
+        try:
+            normalized = normalize_repository_url(value)
+        except ValueError as error:
+            raise serializers.ValidationError(str(error)) from error
+        existing = Repository.objects.filter(url=normalized)
+        if self.instance:
+            existing = existing.exclude(pk=self.instance.pk)
+        if existing.exists():
+            raise serializers.ValidationError("This repository is already registered.")
+        return normalized
+
+    def validate_runtime_image(self, value):
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/:@-]*", value):
+            raise serializers.ValidationError("Use a Docker image name or digest.")
+        return value
+
+    def validate_validation_commands(self, value):
+        return validate_commands(value)
+
+
+class SubmissionSerializer(serializers.Serializer):
+    github_issue = serializers.CharField(max_length=700, required=False)
+    # Kept for existing API clients and historical Jira investigations.
+    jira_ticket = serializers.CharField(max_length=700, required=False)
+    mode = serializers.ChoiceField(choices=["live", "demo"], default=lambda: settings.BUGPILOT_MODE)
+    repository = serializers.CharField(max_length=500, required=False, allow_blank=True)
+
+    def validate_jira_ticket(self, value):
+        try:
+            return parse_ticket(value, settings.JIRA_BASE_URL)
+        except ValueError as error:
+            raise serializers.ValidationError(str(error)) from error
+
+    def validate_repository(self, value):
+        if not value.strip():
+            return None
+        query = Q(name__iexact=value.strip())
+        if value.isdigit():
+            query |= Q(pk=int(value))
+        if value.startswith("https://"):
+            try:
+                query |= Q(url=normalize_repository_url(value))
+            except ValueError as error:
+                raise serializers.ValidationError(str(error)) from error
+        matches = list(Repository.objects.filter(query, is_active=True)[:2])
+        if not matches:
+            raise serializers.ValidationError("Choose an active registered repository, or leave this blank for automatic discovery.")
+        if len(matches) > 1:
+            raise serializers.ValidationError("This repository name is ambiguous. Use its URL or ID.")
+        return matches[0]
+
+    def validate(self, attrs):
+        repository = attrs.get("repository")
+        if bool(attrs.get("github_issue")) == bool(attrs.get("jira_ticket")):
+            raise serializers.ValidationError({"github_issue": "Provide a GitHub issue URL or issues/123 endpoint."})
+        if attrs.get("github_issue"):
+            try:
+                attrs.update(parse_github_issue(attrs["github_issue"], repository.url if repository else ""))
+            except ValueError as error:
+                raise serializers.ValidationError({"github_issue": str(error)}) from error
+            attrs["issue_source"] = "github"
+        else:
+            attrs.update(issue_source="jira", issue_key=attrs["jira_ticket"], issue_url=f"{settings.JIRA_BASE_URL}/browse/{attrs['jira_ticket']}" if settings.JIRA_BASE_URL else "")
+        if attrs["mode"] == "live" and repository and repository.is_demo:
+            raise serializers.ValidationError({"repository": "This is a demo repository. Register your real GitHub repository for live runs."})
+        return attrs
+
+
+class EventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InvestigationEvent
+        fields = ["id", "stage", "message", "created_at"]
+
+
+class InvestigationSerializer(serializers.ModelSerializer):
+    repository = RepositorySerializer(read_only=True)
+    requested_repository = serializers.SlugRelatedField(read_only=True, slug_field="name")
+
+    class Meta:
+        model = Investigation
+        fields = ["id", "issue_source", "source_repository_url", "source_issue_number", "issue_key", "issue_url", "title", "requested_repository", "repository", "mode", "status", "stage",
+                  "selection_reason", "branch", "base_branch", "pull_request_url", "issue_linked", "issue_comment_id", "issue_comment_url", "model_calls", "error", "attempt",
+                  "created_at", "updated_at", "finished_at"]
+        read_only_fields = fields
+
+
+class InvestigationDetailSerializer(InvestigationSerializer):
+    events = EventSerializer(many=True, read_only=True)
+    coding_brief = serializers.SerializerMethodField()
+
+    def get_coding_brief(self, obj):
+        return coding_brief(obj.preprocessed) if obj.preprocessed else ""
+
+    class Meta(InvestigationSerializer.Meta):
+        fields = InvestigationSerializer.Meta.fields + ["ticket", "preprocessed", "coding_brief", "proposal", "validation", "events"]
+        read_only_fields = fields

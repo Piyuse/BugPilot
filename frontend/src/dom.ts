@@ -1,0 +1,103 @@
+interface PageElements {
+  "#submission-guidance": HTMLElement;
+  "#submission-guidance-text": HTMLElement;
+  "#setup-integrations": HTMLButtonElement;
+  "#setup-repository": HTMLButtonElement;
+  "#refresh-setup": HTMLButtonElement;
+  "#execution-mode": HTMLSelectElement;
+  "#live-setup": HTMLElement;
+  "#add-repository": HTMLButtonElement;
+  "#all-table": HTMLElement;
+  "#breadcrumb-page": HTMLElement;
+  "#cancel-repository-dialog": HTMLButtonElement;
+  "#close-drawer": HTMLButtonElement;
+  "#close-repository-dialog": HTMLButtonElement;
+  "#demo-banner": HTMLElement;
+  "#drawer-backdrop": HTMLElement;
+  "#drawer-content": HTMLElement;
+  "#i-arrow": HTMLElement;
+  "#i-bug": HTMLElement;
+  "#i-check": HTMLElement;
+  "#i-clock": HTMLElement;
+  "#i-close": HTMLElement;
+  "#i-grid": HTMLElement;
+  "#i-out": HTMLElement;
+  "#i-plug": HTMLElement;
+  "#i-plus": HTMLElement;
+  "#i-pr": HTMLElement;
+  "#i-repo": HTMLElement;
+  "#i-search": HTMLElement;
+  "#i-settings": HTMLElement;
+  "#id_password": HTMLInputElement;
+  "#id_username": HTMLInputElement;
+  "#integration-cards": HTMLElement;
+  "#integration-notice": HTMLElement;
+  "#investigation-drawer": HTMLElement;
+  "#investigation-search": HTMLInputElement;
+  "#github-issue": HTMLInputElement;
+  "#github-issue-help": HTMLElement;
+  "#loading-error": HTMLElement;
+  "#login-error": HTMLElement;
+  "#login-form": HTMLFormElement;
+  "#main": HTMLElement;
+  "#mobile-menu": HTMLButtonElement;
+  "#nav-running": HTMLElement;
+  "#new-investigation": HTMLButtonElement;
+  "#next-page": HTMLButtonElement;
+  "#page-info": HTMLElement;
+  "#page-integrations": HTMLElement;
+  "#page-investigations": HTMLElement;
+  "#page-overview": HTMLElement;
+  "#page-repositories": HTMLElement;
+  "#previous-page": HTMLButtonElement;
+  "#ready-caption": HTMLElement;
+  "#recent-count": HTMLElement;
+  "#recent-table": HTMLElement;
+  "#repo-active": HTMLInputElement;
+  "#repo-branch": HTMLInputElement;
+  "#repo-commands": HTMLTextAreaElement;
+  "#repo-description": HTMLTextAreaElement;
+  "#repo-id": HTMLInputElement;
+  "#repo-image": HTMLInputElement;
+  "#repo-name": HTMLInputElement;
+  "#repo-url": HTMLInputElement;
+  "#repository-cards": HTMLElement;
+  "#repository-dialog": HTMLDialogElement;
+  "#repository-dialog-title": HTMLElement;
+  "#repository-error": HTMLElement;
+  "#repository-form": HTMLFormElement;
+  "#repository-input": HTMLInputElement;
+  "#repository-suggestions": HTMLDataListElement;
+  "#repository-help": HTMLElement;
+  "#find-repository": HTMLButtonElement;
+  "#save-repository": HTMLButtonElement;
+  "#sidebar": HTMLElement;
+  "#sign-out": HTMLButtonElement;
+  "#stat-attention": HTMLElement;
+  "#stat-ready": HTMLElement;
+  "#stat-running": HTMLElement;
+  "#stat-total": HTMLElement;
+  "#status-filter": HTMLSelectElement;
+  "#submit-ticket": HTMLButtonElement;
+  "#ticket-error": HTMLElement;
+  "#ticket-form": HTMLFormElement;
+  "#toast": HTMLElement;
+  "#today": HTMLElement;
+  "#try-demo": HTMLButtonElement;
+  "#worker-dot": HTMLElement;
+  "#worker-label": HTMLElement;
+}
+
+export function element<K extends keyof PageElements>(selector: K): PageElements[K];
+export function element<T extends HTMLElement = HTMLElement>(selector: string): T;
+export function element(selector: string): HTMLElement {
+  const node = document.querySelector<HTMLElement>(selector);
+  if (!node) throw new Error("Required page element is missing: " + selector);
+  return node;
+}
+
+export const elements = <T extends HTMLElement = HTMLElement>(selector: string): T[] =>
+  [...document.querySelectorAll<T>(selector)];
+
+export const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : "Something went wrong. Please try again.";

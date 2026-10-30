@@ -1,28 +1,18 @@
 from django.urls import path
 
-from .views import health_check,BugReportListCreateView,BugReportDetailView,RepositoryDetailView,RepositoryListCreateView
-
+from . import auth_views, views
 
 urlpatterns = [
-    path("health/", health_check, name="health-check"),
-        path(
-        "bug-reports/",
-        BugReportListCreateView.as_view(),
-        name="bug-report-list-create",
-    ),
-    path(
-        "bug-reports/<int:pk>/",
-        BugReportDetailView.as_view(),
-        name="bug-report-detail",
-    ),
-    path(
-    "repositories/",
-    RepositoryListCreateView.as_view(),
-    name="repository-list-create",
-),
-path(
-    "repositories/<int:pk>/",
-    RepositoryDetailView.as_view(),
-    name="repository-detail",
-),
+    path("auth/session/", auth_views.session_view, name="auth-session"),
+    path("auth/login/", auth_views.login_view, name="auth-login"),
+    path("auth/logout/", auth_views.logout_view, name="auth-logout"),
+    path("health/", views.health_check, name="health-check"),
+    path("overview/", views.overview, name="overview"),
+    path("investigations/", views.InvestigationListView.as_view(), name="investigation-list"),
+    path("investigations/<uuid:pk>/", views.InvestigationDetailView.as_view(), name="investigation-detail"),
+    path("investigations/<uuid:pk>/retry/", views.retry_investigation, name="investigation-retry"),
+    path("repositories/", views.RepositoryListCreateView.as_view(), name="repository-list-create"),
+    path("repositories/<int:pk>/", views.RepositoryDetailView.as_view(), name="repository-detail"),
+    path("bug-reports/", views.BugReportListCreateView.as_view(), name="bug-report-list-create"),
+    path("bug-reports/<int:pk>/", views.BugReportDetailView.as_view(), name="bug-report-detail"),
 ]

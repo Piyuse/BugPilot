@@ -1,16 +1,11 @@
-# Python
 __pycache__/
 *.py[cod]
 .venv/
-
-# Local configuration
 .env
 .env.*
-
-# Local database
+!.env.example
 db.sqlite3
-
-# Editor and operating system files
+staticfiles/
 .vscode/
 .idea/
 .DS_Store
