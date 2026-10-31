@@ -14,7 +14,7 @@ from rest_framework.test import APIClient
 
 from . import execution
 from .integrations import OpenAIPreprocessor, GitHubClient, IntegrationError, JiraClient, adf_text
-from .models import BugReport, Investigation, Repository, WorkerHeartbeat
+from .models import Investigation, Repository, WorkerHeartbeat
 from .pipeline import run_investigation, select_repository
 from .queue import claim_next, recover_stale
 from .repository_urls import normalize_repository_url, parse_ticket
@@ -166,10 +166,10 @@ class APITests(TestCase):
         duplicate = self.client.post("/api/repositories/", {"name": "other", "url": "https://github.com/Acme/Checkout.git"}, format="json")
         self.assertEqual(duplicate.status_code, 400)
 
-    def test_legacy_report_serializer_is_fixed(self):
-        response = self.client.post("/api/bug-reports/", {"title": "Crash", "description": "Details", "expected_behavior": "No crash"}, format="json")
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(BugReport.objects.get().expected_behavior, "No crash")
+    def test_removed_legacy_report_endpoints_are_not_exposed(self):
+        self.assertEqual(self.client.get("/api/bug-reports/").status_code, 404)
+        self.assertEqual(self.client.post("/api/bug-reports/", {}, format="json").status_code, 404)
+        self.assertEqual(self.client.get("/api/bug-reports/1/").status_code, 404)
 
     def test_case_ambiguous_repository_names_are_not_guessed(self):
         Repository.objects.create(name="CHECKOUT", url="https://github.com/acme/other-checkout")

@@ -4,7 +4,7 @@ from django.conf import settings
 from django.db.models import Q
 from rest_framework import serializers
 
-from .models import BugReport, Investigation, InvestigationEvent, Repository
+from .models import Investigation, InvestigationEvent, Repository
 from .repository_urls import normalize_repository_url, parse_ticket, parse_github_issue
 from .task_context import coding_brief
 
@@ -16,22 +16,6 @@ def validate_commands(value):
         if not isinstance(command, list) or not command or len(command) > 50 or any(not isinstance(arg, str) or not arg or len(arg) > 1000 or "\x00" in arg for arg in command):
             raise serializers.ValidationError('Commands must be argument arrays, for example [["python", "-m", "pytest"]].')
     return value
-
-
-class BugReportSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = BugReport
-        fields = ["id", "title", "description", "expected_behavior", "reproduction_steps", "error_details", "repository_url", "created_at"]
-        read_only_fields = ["id", "created_at"]
-        extra_kwargs = {"description": {"max_length": 30000}}
-
-    def validate_repository_url(self, value):
-        if not value:
-            return value
-        try:
-            return normalize_repository_url(value)
-        except ValueError as error:
-            raise serializers.ValidationError(str(error)) from error
 
 
 class RepositorySerializer(serializers.ModelSerializer):

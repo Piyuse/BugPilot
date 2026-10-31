@@ -10,10 +10,10 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
-from .models import BugReport, Investigation, InvestigationEvent, Repository, WorkerHeartbeat
+from .models import Investigation, InvestigationEvent, Repository, WorkerHeartbeat
 from .configuration import missing_live_settings, pipeline_configuration
 from .pipeline import STAGES
-from .serializers import (BugReportSerializer, InvestigationDetailSerializer, InvestigationSerializer,
+from .serializers import (InvestigationDetailSerializer, InvestigationSerializer,
                           RepositorySerializer, SubmissionSerializer)
 
 
@@ -43,17 +43,6 @@ class RepositoryDetailView(generics.RetrieveUpdateAPIView):
     queryset = Repository.objects.all()
     serializer_class = RepositorySerializer
     permission_classes = [RegistryPermission]
-
-
-class BugReportListCreateView(generics.ListCreateAPIView):
-    queryset = BugReport.objects.all()
-    serializer_class = BugReportSerializer
-    pagination_class = Pagination
-
-
-class BugReportDetailView(generics.RetrieveAPIView):
-    queryset = BugReport.objects.all()
-    serializer_class = BugReportSerializer
 
 
 class InvestigationListView(generics.ListAPIView):

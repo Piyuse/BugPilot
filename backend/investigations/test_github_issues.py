@@ -222,6 +222,7 @@ class GitHubSourceMigrationTests(TransactionTestCase):
         old = [("investigations", "0005_alter_investigation_mode")]
         new = [("investigations", "0006_github_issue_intake")]
         executor = MigrationExecutor(connection)
+        latest = executor.loader.graph.leaf_nodes()
         try:
             executor.migrate(old)
             old_model = executor.loader.project_state(old).apps.get_model("investigations", "Investigation")
@@ -236,4 +237,31 @@ class GitHubSourceMigrationTests(TransactionTestCase):
             self.assertTrue(restored.issue_linked)
             self.assertEqual(new_model(issue_key="acme/checkout#1").issue_source, "github")
         finally:
-            MigrationExecutor(connection).migrate([("investigations", "0007_automatic_default_branch")])
+            MigrationExecutor(connection).migrate(latest)
+
+
+class LegacyReportRemovalMigrationTests(TransactionTestCase):
+    def test_removing_legacy_table_preserves_investigations_and_repositories(self):
+        old = [("investigations", "0008_fork_publication")]
+        new = [("investigations", "0009_remove_bugreport")]
+        executor = MigrationExecutor(connection)
+        latest = executor.loader.graph.leaf_nodes()
+        try:
+            executor.migrate(old)
+            apps = executor.loader.project_state(old).apps
+            apps.get_model("investigations", "BugReport").objects.create(title="Legacy report", description="Old standalone intake")
+            repository = apps.get_model("investigations", "Repository").objects.create(name="project", url="https://github.com/acme/project")
+            investigation = apps.get_model("investigations", "Investigation").objects.create(
+                issue_key="acme/project#1", repository=repository, pull_request_url="https://github.com/acme/project/pull/2")
+            executor = MigrationExecutor(connection)
+            executor.migrate(new)
+            apps = executor.loader.project_state(new).apps
+            self.assertNotIn("investigations_bugreport", connection.introspection.table_names())
+            with self.assertRaises(LookupError):
+                apps.get_model("investigations", "BugReport")
+            saved = apps.get_model("investigations", "Investigation").objects.get(pk=investigation.pk)
+            self.assertEqual(saved.repository_id, repository.pk)
+            self.assertEqual(saved.pull_request_url, "https://github.com/acme/project/pull/2")
+            self.assertTrue(apps.get_model("investigations", "Repository").objects.filter(pk=repository.pk).exists())
+        finally:
+            MigrationExecutor(connection).migrate(latest)
