@@ -13,6 +13,4 @@ urlpatterns = [
     path("investigations/<uuid:pk>/retry/", views.retry_investigation, name="investigation-retry"),
     path("repositories/", views.RepositoryListCreateView.as_view(), name="repository-list-create"),
     path("repositories/<int:pk>/", views.RepositoryDetailView.as_view(), name="repository-detail"),
-    path("bug-reports/", views.BugReportListCreateView.as_view(), name="bug-report-list-create"),
-    path("bug-reports/<int:pk>/", views.BugReportDetailView.as_view(), name="bug-report-detail"),
 ]

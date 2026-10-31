@@ -1,12 +1,5 @@
 from django.contrib import admin
-from .models import BugReport, Investigation, InvestigationEvent, Repository
-
-
-@admin.register(BugReport)
-class BugReportAdmin(admin.ModelAdmin):
-    list_display = ["id", "title", "repository_url", "created_at"]
-    search_fields = ["title", "description"]
-
+from .models import Investigation, InvestigationEvent, Repository
 
 @admin.register(Repository)
 class RepositoryAdmin(admin.ModelAdmin):

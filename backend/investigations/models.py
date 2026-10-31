@@ -7,22 +7,6 @@ from django.db import models
 from .repository_urls import normalize_repository_url
 
 
-class BugReport(models.Model):
-    title = models.CharField(max_length=200)
-    description = models.TextField()
-    expected_behavior = models.TextField(blank=True)
-    reproduction_steps = models.TextField(blank=True)
-    error_details = models.TextField(blank=True)
-    repository_url = models.URLField(max_length=500, blank=True)
-    created_at = models.DateField(auto_now_add=True)
-
-    class Meta:
-        ordering = ["-created_at", "-id"]
-
-    def __str__(self):
-        return f"BUG-{self.pk}: {self.title}"
-
-
 class Repository(models.Model):
     name = models.CharField(max_length=200, unique=True)
     url = models.URLField(max_length=500, unique=True)
@@ -48,6 +32,9 @@ class Repository(models.Model):
     def __str__(self):
         return self.name
 
+    @property
+    def is_demo(self):
+        return self.url.startswith("https://github.com/bugpilot-demo/")
 
 
 class Investigation(models.Model):
