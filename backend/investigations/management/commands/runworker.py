@@ -17,7 +17,7 @@ class Command(BaseCommand):
         parser.add_argument("--poll", type=float, default=2)
 
     def handle(self, *args, **options):
-        self.stdout.write("BugPilot worker ready.")
+        self.stdout.write("BugPilot worker ready and running ...")
         stop = threading.Event()
         try:
             while not stop.is_set():
