@@ -11,7 +11,7 @@ async function start(): Promise<void> {
     const session = await api<Session>("auth/session/");
     if (session.authenticated) {
       document.body.className = "";
-      document.title = "BugPilot · Your bugs, handled";
+      document.title = "BugPilot";
       app.innerHTML = dashboardView;
       const { mountDashboard } = await import("./dashboard");
       mountDashboard(session);
