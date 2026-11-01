@@ -32,9 +32,6 @@ class Repository(models.Model):
     def __str__(self):
         return self.name
 
-    @property
-    def is_demo(self):
-        return self.url.startswith("https://github.com/bugpilot-demo/")
 
 
 class Investigation(models.Model):
