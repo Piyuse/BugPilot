@@ -4,7 +4,6 @@ interface PageElements {
   "#setup-integrations": HTMLButtonElement;
   "#setup-repository": HTMLButtonElement;
   "#refresh-setup": HTMLButtonElement;
-  "#execution-mode": HTMLSelectElement;
   "#live-setup": HTMLElement;
   "#add-repository": HTMLButtonElement;
   "#all-table": HTMLElement;
@@ -12,7 +11,6 @@ interface PageElements {
   "#cancel-repository-dialog": HTMLButtonElement;
   "#close-drawer": HTMLButtonElement;
   "#close-repository-dialog": HTMLButtonElement;
-  "#demo-banner": HTMLElement;
   "#drawer-backdrop": HTMLElement;
   "#drawer-content": HTMLElement;
   "#i-arrow": HTMLElement;
@@ -83,7 +81,6 @@ interface PageElements {
   "#ticket-form": HTMLFormElement;
   "#toast": HTMLElement;
   "#today": HTMLElement;
-  "#try-demo": HTMLButtonElement;
   "#worker-dot": HTMLElement;
   "#worker-label": HTMLElement;
 }

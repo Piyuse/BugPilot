@@ -77,9 +77,6 @@ REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
 }
 
-BUGPILOT_MODE = os.getenv("BUGPILOT_MODE", "live")
-if BUGPILOT_MODE not in {"demo", "live"}:
-    raise ImproperlyConfigured("BUGPILOT_MODE must be demo or live.")
 # Preserve the workspace root introduced by the original project.
 BUGPILOT_WORKSPACE_ROOT = Path(os.getenv("BUGPILOT_WORKSPACE_ROOT", str(BASE_DIR.parent / "workspaces")))
 BUGPILOT_AGENT_TIMEOUT = int(os.getenv("BUGPILOT_AGENT_TIMEOUT", "1200"))
@@ -88,7 +85,6 @@ BUGPILOT_TEST_MEMORY = os.getenv("BUGPILOT_TEST_MEMORY", "2g")
 BUGPILOT_VALIDATION_SETUP_TIMEOUT = int(os.getenv("BUGPILOT_VALIDATION_SETUP_TIMEOUT", "1200"))
 BUGPILOT_GIT_NETWORK_TIMEOUT = int(os.getenv("BUGPILOT_GIT_NETWORK_TIMEOUT", "600"))
 BUGPILOT_LEASE_SECONDS = int(os.getenv("BUGPILOT_LEASE_SECONDS", "1800"))
-BUGPILOT_DEMO_STAGE_DELAY = float(os.getenv("BUGPILOT_DEMO_STAGE_DELAY", "0.5"))
 JIRA_BASE_URL = os.getenv("JIRA_BASE_URL", "").rstrip("/")
 JIRA_EMAIL = os.getenv("JIRA_EMAIL", "")
 JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN", "")

@@ -55,7 +55,7 @@ class GitHubIssueParsingTests(SimpleTestCase):
                 parse_github_issue(value, "https://github.com/acme/checkout")
 
 
-@override_settings(BUGPILOT_MODE="demo")
+@override_settings(**LIVE_SETTINGS)
 class GitHubIssueIntakeTests(TestCase):
     def setUp(self):
         self.client = APIClient()

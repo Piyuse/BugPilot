@@ -1,5 +1,4 @@
 """Durable, checkpointed ticket-to-PR orchestration used by the worker."""
-import time
 from pathlib import Path
 
 from django.conf import settings
@@ -35,12 +34,12 @@ def stage(run, key, message):
 
 def select_repository(run, openai, github):
     if run.requested_repository_id:
-        if not run.requested_repository.is_active or run.requested_repository.is_demo:
-            raise IntegrationError("The selected repository is inactive or is a demo fixture.")
+        if not run.requested_repository.is_active:
+            raise IntegrationError("The selected repository is inactive.")
         return run.requested_repository, "Selected by the developer."
-    repositories = list(Repository.objects.filter(is_active=True).exclude(url__startswith="https://github.com/bugpilot-demo/"))
+    repositories = list(Repository.objects.filter(is_active=True))
     if not repositories:
-        raise IntegrationError("Register at least one active, real repository in Repositories. Demo fixtures cannot be used for live runs.")
+        raise IntegrationError("Register at least one active repository in Repositories.")
     if run.issue_source == "github":
         hosting_repository = next((repo for repo in repositories if repo.url == run.source_repository_url), None)
         if hosting_repository:
@@ -63,10 +62,7 @@ def complete(run):
         status=run.status, stage=run.stage, error="", finished_at=run.finished_at, updated_at=timezone.now()
     ):
         raise IntegrationError("This worker no longer owns the investigation.")
-    InvestigationEvent.objects.create(investigation=run, stage="completed", message=(
-        "Demo complete. No external services, branches, PRs or issue comments were created."
-        if run.mode == "demo" else f"Pull request is ready for review and its URL was posted as a {run.issue_source.title()} issue comment."
-    ))
+    InvestigationEvent.objects.create(investigation=run, stage="completed", message=f"Pull request is ready for review and its URL was posted as a {run.issue_source.title()} issue comment.")
 
 
 def fix_branch(run):
@@ -191,52 +187,14 @@ def run_live(run):
     complete(run)
 
 
-def run_demo(run):
-    """Deterministic local fixture; deliberately performs no external actions."""
-    repositories = list(Repository.objects.filter(is_active=True))
-    if run.requested_repository_id and not run.requested_repository.is_active:
-        raise IntegrationError("The selected repository is inactive or is a demo fixture.")
-    if not repositories:
-        raise IntegrationError("Register a repository, or run the seed_demo management command.")
-    for key, label in STAGES:
-        stage(run, key, f"[Demo simulation] {label}.")
-        if key == "fetching_ticket":
-            run.title = "Checkout fails when a discount expires during payment"
-            run.ticket = {"title": run.title, "description": "An expired promotion returns None from the discount lookup. Checkout accesses discount.amount and returns HTTP 500 instead of charging the normal price.", "priority": "High", "labels": ["checkout", "payments"], "components": ["Checkout"]}
-        elif key == "preprocessing":
-            run.preprocessed = {
-                "summary": "Checkout dereferences an expired discount without a null check.",
-                "expected_behavior": "Complete checkout at the normal price when a discount expires.",
-                "actual_behavior": "HTTP 500 while reading discount.amount.",
-                "reproduction_steps": ["Add a discounted product to the cart.", "Let the promotion expire.", "Complete payment."],
-                "error_details": "AttributeError: 'NoneType' object has no attribute 'amount'",
-                "keywords": ["checkout", "discount", "payment", "expiration"],
-            }
-        elif key == "selecting_repository":
-            run.repository = run.requested_repository or next((repo for repo in repositories if "checkout" in repo.name.lower()), repositories[0])
-            run.selection_reason = "Demo fixture matches checkout and discount symptoms to the checkout service." if not run.requested_repository_id else "Selected by the developer."
-        elif key == "preparing_workspace":
-            run.branch = fix_branch(run)
-        elif key == "fixing":
-            run.proposal = {
-                "summary": "Handle an expired promotion by falling back to the normal checkout total.",
-                "root_cause": "The discount lookup can return None after a promotion expires, but checkout assumes a discount always exists.",
-                "tests_added": ["Expired promotions use the normal price.", "Active promotions still apply the discount."],
-                "diff": "--- a/checkout/pricing.py\n+++ b/checkout/pricing.py\n@@ -18,2 +18,2 @@\n-    total = subtotal - discount.amount\n+    total = subtotal - (discount.amount if discount else 0)\n     return max(total, 0)\n",
-            }
-        elif key == "validating":
-            run.validation = {"passed": True, "simulated": True, "checks": [{"command": ["python", "-m", "pytest", "tests/test_checkout.py"], "passed": True, "output": "Demo fixture: 12 simulated tests passed. No tests were executed."}], "changed_files": ["checkout/pricing.py", "tests/test_checkout.py"]}
-        run.save(update_fields=["title", "ticket", "preprocessed", "repository", "selection_reason", "branch", "proposal", "validation", "updated_at"])
-        time.sleep(settings.BUGPILOT_DEMO_STAGE_DELAY)
-    complete(run)
-
-
 def run_investigation(investigation_id):
     run = Investigation.objects.select_related("requested_repository", "repository").get(pk=investigation_id)
     if run.status != Investigation.Status.RUNNING:
         return {"status": run.status, "pull_request_url": run.pull_request_url or None}
     try:
-        (run_demo if run.mode == "demo" else run_live)(run)
+        if run.mode != "live":
+            raise IntegrationError("This historical investigation cannot be executed. Submit a new issue to start a live investigation.")
+        run_live(run)
     except Exception as error:
         # Never expose unexpected exception details (which could contain provider credentials).
         message = execution.redact(str(error))[:10000] if isinstance(error, IntegrationError) else "An unexpected worker error occurred. Check the worker logs and retry."

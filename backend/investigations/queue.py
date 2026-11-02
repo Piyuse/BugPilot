@@ -9,10 +9,10 @@ from .models import Investigation, InvestigationEvent
 
 
 def claim_next():
-    candidate = Investigation.objects.filter(status="queued").order_by("created_at").values_list("pk", flat=True).first()
+    candidate = Investigation.objects.filter(status="queued", mode="live").order_by("created_at").values_list("pk", flat=True).first()
     if candidate is None:
         return None
-    claimed = Investigation.objects.filter(pk=candidate, status="queued").update(
+    claimed = Investigation.objects.filter(pk=candidate, status="queued", mode="live").update(
         status="running", attempt=F("attempt") + 1, heartbeat_at=timezone.now(),
         updated_at=timezone.now(), error="", finished_at=None,
     )
@@ -21,7 +21,7 @@ def claim_next():
 
 def recover_stale():
     cutoff = timezone.now() - timedelta(seconds=settings.BUGPILOT_LEASE_SECONDS)
-    stale = Investigation.objects.filter(status="running", heartbeat_at__lt=cutoff)
+    stale = Investigation.objects.filter(status="running", mode="live", heartbeat_at__lt=cutoff)
     for run in stale:
         changed = Investigation.objects.filter(pk=run.pk, status="running", heartbeat_at__lt=cutoff).update(
             status="needs_attention", error="Worker stopped responding. Retry to recover this investigation safely.",
