@@ -212,7 +212,7 @@ class CodingModelHandoffTests(SimpleTestCase):
         self.assertEqual(result["root_cause"], "Missing null guard")
 
 
-@override_settings(BUGPILOT_MODE="live", JIRA_API_TOKEN="", OPENAI_API_KEY="", GITHUB_TOKEN="", CODEX_API_KEY="")
+@override_settings(JIRA_API_TOKEN="", OPENAI_API_KEY="", GITHUB_TOKEN="", CODEX_API_KEY="")
 class LiveModeIntakeTests(TestCase):
     def test_new_internal_records_default_to_live_execution(self):
         self.assertEqual(Investigation(issue_source="jira", issue_key="PAY-143").mode, "live")
@@ -220,18 +220,19 @@ class LiveModeIntakeTests(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.client.force_authenticate(get_user_model().objects.create_user("developer"))
-        self.demo_repo = Repository.objects.create(name="demo-checkout", url="https://github.com/bugpilot-demo/checkout-service")
+        self.repository = Repository.objects.create(name="checkout", url="https://github.com/acme/checkout")
 
-    def test_default_live_submission_reports_missing_credentials_instead_of_simulating(self):
+    def test_default_submission_reports_missing_credentials(self):
         response = self.client.post("/api/investigations/", {"jira_ticket": "PAY-142"}, format="json")
         self.assertEqual(response.status_code, 400)
         self.assertIn("OPENAI_API_KEY", str(response.data))
         self.assertFalse(Investigation.objects.exists())
 
-    def test_explicit_demo_is_still_available_without_credentials(self):
+    def test_removed_execution_mode_cannot_bypass_credentials(self):
         response = self.client.post("/api/investigations/", {"jira_ticket": "PAY-142", "mode": "demo"}, format="json")
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.data["mode"], "demo")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("mode", response.data)
+        self.assertFalse(Investigation.objects.exists())
 
     @override_settings(**LIVE_SETTINGS)
     def test_configured_live_submission_queues_real_pipeline(self):
@@ -240,10 +241,10 @@ class LiveModeIntakeTests(TestCase):
         self.assertEqual(response.data["mode"], "live")
 
     @override_settings(**LIVE_SETTINGS)
-    def test_demo_repository_cannot_be_passed_to_live_coding_model(self):
-        response = self.client.post("/api/investigations/", {"jira_ticket": "PAY-142", "repository": str(self.demo_repo.pk), "mode": "live"}, format="json")
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("demo repository", str(response.data))
+    def test_registered_repository_queues_without_fixture_properties(self):
+        response = self.client.post("/api/investigations/", {"jira_ticket": "PAY-142", "repository": str(self.repository.pk)}, format="json")
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(Investigation.objects.get().requested_repository, self.repository)
 
     def test_overview_explains_model_configuration_without_secrets(self):
         response = self.client.get("/api/overview/")

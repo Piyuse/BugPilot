@@ -19,11 +19,10 @@ def validate_commands(value):
 
 
 class RepositorySerializer(serializers.ModelSerializer):
-    is_demo = serializers.BooleanField(read_only=True)
     runtime_image = serializers.CharField(max_length=200, allow_blank=True, required=False)
     class Meta:
         model = Repository
-        fields = ["id", "name", "url", "default_branch", "description", "is_active", "is_demo", "validation_commands", "runtime_image", "created_at"]
+        fields = ["id", "name", "url", "default_branch", "description", "is_active", "validation_commands", "runtime_image", "created_at"]
         read_only_fields = ["id", "created_at", "default_branch"]
         extra_kwargs = {"description": {"max_length": 10000}}
 
@@ -67,7 +66,8 @@ class SubmissionSerializer(serializers.Serializer):
     github_issue = serializers.CharField(max_length=700, required=False)
     # Kept for existing API clients and historical Jira investigations.
     jira_ticket = serializers.CharField(max_length=700, required=False)
-    mode = serializers.ChoiceField(choices=["live", "demo"], default=lambda: settings.BUGPILOT_MODE)
+    # Retain the live value for existing API clients; execution is always live.
+    mode = serializers.ChoiceField(choices=["live"], default="live")
     repository = serializers.CharField(max_length=500, required=False, allow_blank=True)
 
     def validate_jira_ticket(self, value):
@@ -106,8 +106,6 @@ class SubmissionSerializer(serializers.Serializer):
             attrs["issue_source"] = "github"
         else:
             attrs.update(issue_source="jira", issue_key=attrs["jira_ticket"], issue_url=f"{settings.JIRA_BASE_URL}/browse/{attrs['jira_ticket']}" if settings.JIRA_BASE_URL else "")
-        if attrs["mode"] == "live" and repository and repository.is_demo:
-            raise serializers.ValidationError({"repository": "This is a demo repository. Register your real GitHub repository for live runs."})
         return attrs
 
 

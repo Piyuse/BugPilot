@@ -16,7 +16,7 @@ python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
 .venv/Scripts/python.exe manage.py migrate
-.venv/Scripts/python.exe manage.py seed_demo
+.venv/Scripts/python.exe manage.py createsuperuser
 .venv/Scripts/python.exe manage.py runserver 127.0.0.1:8000
 ```
 
@@ -38,15 +38,7 @@ npm run dev
 
 Open [BugPilot](http://127.0.0.1:5173). The frontend lives in `frontend/` and uses strict TypeScript; Django serves APIs and the worker. Vite proxies `/api/` to port 8000. Set `BACKEND_URL` in `frontend/.env` if using another backend port.
 
-For a local simulation, sign in with **demo / bugpilot-demo**, choose **Demo**, and click **Try a sample issue**. The fixture URL is:
-
-```text
-https://github.com/bugpilot-demo/checkout-service/issues/142
-```
-
-Demo mode uses a fixed checkout bug. It never calls providers/Docker or creates actual code changes, branches, PRs or issue comments. Results are labeled. The sample repository namespace is excluded from live coding.
-
-The seed command requires `DEBUG=true` and preserves existing passwords. Use `createsuperuser` and Django admin for shared deployments, and remove the demo account there.
+Sign in with the account created by `createsuperuser`, then register your repositories and configure the backend credentials.
 
 ## Accepted GitHub issue inputs
 
@@ -69,7 +61,6 @@ Browser and API URL variants share a canonical identity such as `owner/repo#123`
 Copy `backend/.env.example` to `backend/.env`, or use actual environment variables (which take precedence):
 
 ```env
-BUGPILOT_MODE=live
 GITHUB_TOKEN=your-scoped-github-token
 OPENAI_API_KEY=your-openai-api-key
 OPENAI_PREPROCESS_MODEL=gpt-6-luna
@@ -92,7 +83,7 @@ On native Windows, BugPilot explicitly selects `BUGPILOT_WINDOWS_SANDBOX=mxc` an
 
 Agent output and sandbox state are isolated per investigation attempt in `workspaces/<investigation>/agent-attempt-<attempt>/`. The bounded `agent-output.log` redacts configured service keys. Empty patches remain blocked; errors include the agent's explanation so permission failures are visible instead of looking like successful fixes.
 
-Restart the API and worker after changing configuration. The live form shows missing settings and never silently falls back to a demo. Configuration presence does not verify provider permissions or model access. Provider requests remain untested against your accounts until credentials are supplied.
+Restart the API and worker after changing configuration. The form shows missing settings before an investigation can start. Configuration presence does not verify provider permissions or model access. Provider requests remain untested against your accounts until credentials are supplied.
 
 Optional settings: `BUGPILOT_WORKSPACE_ROOT` (default project-root `workspaces/`), `BUGPILOT_AGENT_TIMEOUT` (1200 seconds), `BUGPILOT_TEST_TIMEOUT` (300 seconds/check), `BUGPILOT_GIT_NETWORK_TIMEOUT` (600 seconds per clone/fetch/push/remote lookup), `BUGPILOT_LEASE_SECONDS` (1800 seconds).
 
@@ -111,6 +102,10 @@ Admins add/edit repositories through the dashboard; other signed-in developers c
 Automatic validation detects root Node.js `package.json` test scripts (npm, pnpm or Yarn) and Python projects (pytest). BugPilot builds a Linux dependency image before calling the coding agent, then runs the detected tests offline against the proposed fix. It respects Node lockfiles and pinned package-manager versions, installs Python requirement files and project test extras, and recognizes literal pip dependencies in CI for mixed Node/Python tests. Image preparation can access package registries; no BugPilot API credentials or untracked files enter the build context. Secret files are excluded from tracked source too. Images are cached by repository, Git revision and build recipe, and refreshed when that revision changes. `BUGPILOT_VALIDATION_SETUP_TIMEOUT` controls preparation (default 1200 seconds).
 
 If no supported test setup exists, detection stops with an actionable error; tests are never silently skipped. Other languages, nested project layouts, private dependency registries, browser/native toolchains and complex monorepos may need a custom prepared image and checks. Existing custom configurations remain in use.
+
+For pnpm repositories, the image preserves allowlisted `.npmrc` settings for workspace linking and dependency layout. Registry credentials and other `.npmrc` settings are excluded. Changes to these layout settings invalidate the cached image; package preparation scripts and regression tests remain enabled.
+
+Python projects with `uv.lock`, uv settings, dependency groups, or project metadata without a package build system use uv to prepare their dependencies. Existing uv locks are installed as committed with `--frozen`, without re-resolving or rewriting them; declared test/development groups and test extras are included, and a declared `cpu` extra is selected for the Linux CPU test environment. Dependency-only projects are not forced through `pip install -e .`. Projects declaring a build system or legacy setuptools packaging retain package installation. Prepared uv environments live outside the copied source tree, and regression checks invoke Python/pytest directly without syncing or downloading dependencies.
 
 The timeline reports dependency setup as **Prepare test environment**, separately from creating the fix branch. Docker Desktop Resource Saver can stop/wake the engine between a successful `docker info` check and a build. BugPilot checks builder readiness immediately before building and retries recognized transport disconnections up to three times, reusing cached layers within one setup timeout. Dependency-install, Dockerfile, permission and test failures are not automatically replayed. It does not restart Docker Desktop or change Resource Saver settings.
 

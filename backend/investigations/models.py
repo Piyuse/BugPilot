@@ -51,7 +51,7 @@ class Investigation(models.Model):
     requested_repository = models.ForeignKey(Repository, on_delete=models.PROTECT, null=True, blank=True, related_name="requests")
     repository = models.ForeignKey(Repository, on_delete=models.PROTECT, null=True, blank=True, related_name="investigations")
     submitted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
-    mode = models.CharField(max_length=10, choices=[("live", "Live"), ("demo", "Demo")], default="live")
+    mode = models.CharField(max_length=10, choices=[("live", "Live")], default="live")
     status = models.CharField(max_length=30, choices=Status.choices, default=Status.QUEUED, db_index=True)
     stage = models.CharField(max_length=30, default="queued")
     ticket = models.JSONField(default=dict, blank=True)

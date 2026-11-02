@@ -1,11 +1,10 @@
-export type Mode = "demo" | "live";
 export type Status = "queued" | "running" | "pr_created" | "needs_attention";
 
 export interface Session {
   authenticated: boolean;
   username: string;
   can_manage: boolean;
-  mode: Mode;
+  mode: "live";
 }
 export interface Repository {
   id: number;
@@ -14,7 +13,6 @@ export interface Repository {
   default_branch: string;
   description: string;
   is_active: boolean;
-  is_demo: boolean;
   validation_commands: string[][];
   runtime_image: string;
   created_at: string;
@@ -29,7 +27,7 @@ export interface Investigation {
   title: string;
   requested_repository: string | null;
   repository: Repository | null;
-  mode: Mode;
+  mode: "live";
   status: Status;
   stage: string;
   selection_reason: string;
@@ -67,7 +65,6 @@ export interface InvestigationDetail extends Investigation {
   }>;
   validation: Partial<{
     passed: boolean;
-    simulated: boolean;
     reason: string;
     checks: { command: string[]; passed: boolean; output: string }[];
     changed_files: string[];
@@ -75,7 +72,7 @@ export interface InvestigationDetail extends Investigation {
   events: { id: number; stage: string; message: string; created_at: string }[];
 }
 export interface Overview {
-  mode: Mode;
+  mode: "live";
   counts: Partial<Record<Status, number>>;
   worker_online: boolean;
   worker_last_seen: string | null;

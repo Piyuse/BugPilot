@@ -14,7 +14,7 @@ def session_payload(request):
         "authenticated": authenticated,
         "username": request.user.username if authenticated else "",
         "can_manage": bool(authenticated and request.user.is_staff),
-        "mode": settings.BUGPILOT_MODE,
+        "mode": "live",
     }
 
 

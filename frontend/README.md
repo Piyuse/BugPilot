@@ -11,7 +11,7 @@ npm ci
 npm run dev
 ```
 
-Open http://127.0.0.1:5173. The local demo login is `demo / bugpilot-demo` after running Django's `seed_demo` command. Select **Demo** explicitly to use fixtures. **Live** calls Gemini and Codex, then creates a GitHub PR and posts the URL as a GitHub issue comment; missing credentials are shown in the form.
+Open http://127.0.0.1:5173 and sign in with a Django user account created using `manage.py createsuperuser`. Investigations call OpenAI and Codex, then create a GitHub PR and post the URL as a GitHub issue comment; missing credentials are shown in the form.
 
 Vite forwards `/api/` to Django, preserving the browser Host header for same-origin session cookies and CSRF verification. If Django uses another port, copy `.env.example` to `.env` and set `BACKEND_URL`. Restart Vite after changing it. No provider keys belong in frontend environment variables.
 
@@ -44,7 +44,7 @@ Paste a registered GitHub repository URL or type its name in **Affected reposito
 
 ## GitHub issue intake
 
-Paste a browser URL such as `https://github.com/owner/repo/issues/123` or an API endpoint such as `https://api.github.com/repos/owner/repo/issues/123`. A short `issues/123` path requires a registered repository URL or name in Affected repository. Automatic discovery requires a full issue URL so the issue can be fetched. The demo sample button supplies a complete fixture URL. Jira credentials are not needed for GitHub issue runs.
+Paste a browser URL such as `https://github.com/owner/repo/issues/123` or an API endpoint such as `https://api.github.com/repos/owner/repo/issues/123`. A short `issues/123` path requires a registered repository URL or name in Affected repository. Automatic discovery requires a full issue URL so the issue can be fetched. Jira credentials are not needed for GitHub issue runs.
 
 ## Live setup feedback
 

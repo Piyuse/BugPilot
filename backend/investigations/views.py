@@ -50,7 +50,7 @@ class InvestigationListView(generics.ListAPIView):
     pagination_class = Pagination
 
     def get_queryset(self):
-        queryset = Investigation.objects.select_related("repository", "requested_repository").all()
+        queryset = Investigation.objects.select_related("repository", "requested_repository").filter(mode="live")
         value = self.request.query_params.get("status")
         if value in Investigation.Status.values:
             queryset = queryset.filter(status=value)
@@ -69,7 +69,7 @@ class InvestigationListView(generics.ListAPIView):
         existing = Investigation.objects.filter(issue_source=source, issue_key=key, mode=mode).first()
         if existing:
             return Response(InvestigationDetailSerializer(existing).data)
-        if mode == "live" and (missing := missing_live_settings(source)):
+        if missing := missing_live_settings(source):
             return Response({"configuration": "Configure backend/.env and restart the backend and worker. Missing: " + ", ".join(missing)}, status=400)
         try:
             with transaction.atomic():
@@ -88,7 +88,7 @@ class InvestigationListView(generics.ListAPIView):
 
 
 class InvestigationDetailView(generics.RetrieveAPIView):
-    queryset = Investigation.objects.select_related("repository", "requested_repository").prefetch_related("events")
+    queryset = Investigation.objects.select_related("repository", "requested_repository").prefetch_related("events").filter(mode="live")
     serializer_class = InvestigationDetailSerializer
 
 
@@ -96,8 +96,8 @@ class InvestigationDetailView(generics.RetrieveAPIView):
 def retry_investigation(request, pk):
     # A conditional update prevents two simultaneous retries from queuing duplicate work.
     from django.shortcuts import get_object_or_404
-    run = get_object_or_404(Investigation, pk=pk)
-    if run.mode == "live" and not run.pull_request_url and (missing := missing_live_settings(run.issue_source)):
+    run = get_object_or_404(Investigation, pk=pk, mode="live")
+    if not run.pull_request_url and (missing := missing_live_settings(run.issue_source)):
         return Response({"configuration": "Missing live settings: " + ", ".join(missing)}, status=400)
     changes = {}
     if request.data.get("repository"):
@@ -116,7 +116,7 @@ def retry_investigation(request, pk):
 
 @api_view(["GET"])
 def overview(request):
-    counts = dict(Investigation.objects.values("status").annotate(total=Count("id")).values_list("status", "total"))
+    counts = dict(Investigation.objects.filter(mode="live").values("status").annotate(total=Count("id")).values_list("status", "total"))
     heartbeat = WorkerHeartbeat.objects.filter(pk=1).first()
     worker_online = bool(heartbeat and heartbeat.updated_at > timezone.now() - timedelta(seconds=35))
     providers = [
@@ -126,7 +126,7 @@ def overview(request):
         {"name": "Docker", "description": "Isolated regression checks", "configured": bool(shutil.which("docker"))},
     ]
     return Response({
-        "mode": settings.BUGPILOT_MODE, "counts": counts, "worker_online": worker_online,
+        "mode": "live", "counts": counts, "worker_online": worker_online,
         "worker_last_seen": heartbeat.updated_at if heartbeat else None,
         "stages": [{"key": key, "label": label} for key, label in STAGES],
         "integrations": providers, "username": request.user.username, "can_manage": request.user.is_staff,

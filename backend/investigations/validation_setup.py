@@ -3,6 +3,7 @@
 Repository commands only execute inside Docker. Build contexts contain the Git
 snapshot, never the worker's environment, Git credentials or untracked files.
 """
+import configparser
 import hashlib
 import io
 import json
@@ -23,6 +24,7 @@ from .integrations import IntegrationError
 
 AUTO_IMAGE_PREFIX = "bugpilot-auto-"
 CONTEXT_DIR = ".bugpilot-runtime"
+UV_VERSION = "0.13.6"
 
 
 def automatic_validation(repository):
@@ -34,6 +36,7 @@ class ValidationPlan:
     label: str
     commands: list
     dockerfile: str
+    npmrc: str = ""
 
 
 def read_file(workspace, name):
@@ -71,6 +74,89 @@ def runtime_version(value, default):
     if not match:
         return default
     return ".".join(part for part in match.groups() if part and part != "x")
+
+
+def pnpm_workspace_config(workspace):
+    """Preserve dependency layout settings without copying npm credentials or hooks."""
+    allowed = {
+        "link-workspace-packages": {"true", "false", "deep"},
+        "prefer-workspace-packages": {"true", "false"},
+        "shared-workspace-lockfile": {"true", "false"},
+        "node-linker": {"isolated", "hoisted", "pnp"},
+    }
+    settings = {}
+    for line in read_file(workspace, ".npmrc").lstrip("\ufeff").splitlines():
+        key, separator, value = line.strip().partition("=")
+        key = key.strip().lower()
+        if not separator or key not in allowed:
+            continue
+        value = re.split(r"\s+[;#]", value, maxsplit=1)[0].strip().strip("\"'")
+        if value not in allowed[key]:
+            raise IntegrationError(f"Unsupported value for pnpm setting '{key}'. Configure a custom test image in Repositories.")
+        settings[key] = value
+    return "".join(f"{key}={value}\n" for key, value in sorted(settings.items()))
+
+
+def python_validation(workspace, metadata, requirements, common):
+    """Distinguish installable distributions from dependency-only Python projects."""
+    project = metadata.get("project", {})
+    tool = metadata.get("tool", {})
+    groups = metadata.get("dependency-groups", {})
+    if not all(isinstance(value, dict) for value in (project, tool, groups)):
+        raise IntegrationError("Automatic validation found invalid Python project metadata. Configure a custom test image in Repositories.")
+    uv = tool.get("uv", {})
+    if not isinstance(uv, dict):
+        raise IntegrationError("Automatic validation found invalid tool.uv metadata.")
+    config = configparser.ConfigParser(interpolation=None)
+    try:
+        config.read_string(read_file(workspace, "setup.cfg"))
+    except configparser.Error:
+        raise IntegrationError("Automatic validation could not parse setup.cfg.") from None
+    packaged = "build-system" in metadata or (workspace / "setup.py").is_file() or config.has_section("metadata")
+    use_uv = ((workspace / "pyproject.toml").is_file()
+              and ((workspace / "uv.lock").is_file() or (workspace / "uv.toml").is_file()
+                   or "uv" in tool or bool(groups) or (bool(project) and not packaged)))
+    version = runtime_version(read_file(workspace, ".python-version"), "3.12")
+    extras = project.get("optional-dependencies", {})
+    if not isinstance(extras, dict):
+        raise IntegrationError("Automatic validation found invalid optional Python dependencies.")
+    test_extra = next((name for name in ("test", "tests", "dev") if name in extras), None)
+    additional = ci_python_packages(workspace)
+    if use_uv:
+        install = "RUN " + json.dumps(["python", "-m", "pip", "install", "--no-cache-dir", f"uv=={UV_VERSION}"]) + "\n"
+        # Keep the interpreter/dependencies outside /work, which is replaced by
+        # the writable test volume. Pytest runs directly, so checks never sync.
+        install += 'ENV UV_PROJECT_ENVIRONMENT=/opt/bugpilot-venv UV_PYTHON_DOWNLOADS=never UV_NO_CACHE=1 PATH="/opt/bugpilot-venv/bin:${PATH}"\n'
+        sync = ["uv", "sync", "--python", "/usr/local/bin/python"]
+        if (workspace / "uv.lock").is_file():
+            # Install the committed resolution as-is. Locks may include
+            # one-off resolver options absent from pyproject.toml; checking
+            # freshness would re-resolve those dependencies during setup.
+            sync.append("--frozen")
+        if "cpu" in extras:
+            sync.extend(["--extra", "cpu"])
+        if test_extra:
+            sync.extend(["--extra", test_extra])
+        test_group = next((name for name in ("test", "tests", "dev") if name in groups), None)
+        if test_group:
+            sync.extend(["--group", test_group])
+        elif uv.get("dev-dependencies"):
+            sync.append("--dev")
+        install += "RUN " + json.dumps(sync) + "\n"
+        pip = ["uv", "pip", "install", "--python", "/opt/bugpilot-venv/bin/python"]
+        for name in requirements:
+            install += "RUN " + json.dumps([*pip, "-r", name]) + "\n"
+        install += "RUN " + json.dumps([*pip, "pytest", *additional]) + "\n"
+        label = "Python (uv + pytest)"
+    else:
+        pip = ["python", "-m", "pip", "install", "--no-cache-dir"]
+        install = "RUN " + json.dumps([*pip, "pytest", *additional]) + "\n"
+        for name in requirements:
+            install += "RUN " + json.dumps([*pip, "-r", name]) + "\n"
+        if packaged:
+            install += "RUN " + json.dumps([*pip, "-e", f".[{test_extra}]" if test_extra else "."]) + "\n"
+        label = "Python (pytest)"
+    return ValidationPlan(label, [["python", "-m", "pytest"]], f"FROM python:{version}-bookworm\n" + common + install)
 
 
 def detect_validation(workspace):
@@ -120,24 +206,17 @@ def detect_validation(workspace):
         install += "RUN " + json.dumps(args) + "\n"
         if python_packages:
             install += "RUN " + json.dumps(["python", "-m", "pip", "install", "--no-cache-dir", *python_packages]) + "\n"
-        return ValidationPlan(f"Node.js ({tool} test)", [[tool, "test"]], base + common + install)
+        npmrc = pnpm_workspace_config(workspace) if tool == "pnpm" else ""
+        return ValidationPlan(f"Node.js ({tool} test)", [[tool, "test"]], base + common + install, npmrc)
 
     pyproject = read_file(workspace, "pyproject.toml")
     requirements = [name for name in ("requirements.txt", "requirements-dev.txt", "requirements-test.txt") if (workspace / name).is_file()]
-    if pyproject or requirements or (workspace / "setup.py").is_file() or (workspace / "pytest.ini").is_file() or any((workspace / "tests").glob("test*.py")) or any(workspace.glob("test_*.py")):
+    if pyproject or requirements or (workspace / "setup.py").is_file() or (workspace / "setup.cfg").is_file() or (workspace / "pytest.ini").is_file() or any((workspace / "tests").glob("test*.py")) or any(workspace.glob("test_*.py")):
         try:
             metadata = tomllib.loads(pyproject) if pyproject else {}
         except ValueError:
             raise IntegrationError("Automatic validation could not parse pyproject.toml. Fix it or configure custom checks in Repositories.") from None
-        version = runtime_version(read_file(workspace, ".python-version"), "3.12")
-        install = "RUN " + json.dumps(["python", "-m", "pip", "install", "--no-cache-dir", "pytest", *ci_python_packages(workspace)]) + "\n"
-        for name in requirements:
-            install += "RUN " + json.dumps(["python", "-m", "pip", "install", "--no-cache-dir", "-r", name]) + "\n"
-        if (workspace / "setup.py").is_file() or metadata.get("project") or metadata.get("tool", {}).get("poetry"):
-            extras = metadata.get("project", {}).get("optional-dependencies", {})
-            extra = next((key for key in ("test", "tests", "dev") if key in extras), "")
-            install += "RUN " + json.dumps(["python", "-m", "pip", "install", "--no-cache-dir", "-e", f".[{extra}]" if extra else "."]) + "\n"
-        return ValidationPlan("Python (pytest)", [["python", "-m", "pytest"]], f"FROM python:{version}-bookworm\n" + common + install)
+        return python_validation(workspace, metadata, requirements, common)
     raise IntegrationError("BugPilot could not detect a supported test setup. Automatic validation supports root package.json test scripts and Python projects. Configure a prepared test image and custom checks in Repositories for other layouts. No untested PR will be created.")
 
 
@@ -148,7 +227,7 @@ def excluded_path(name):
             or name.endswith((".pem", ".key")))
 
 
-def build_context(snapshot, destination, dockerfile):
+def build_context(snapshot, destination, dockerfile, *, npmrc=""):
     # Filter tracked secret/config files too; Git tracking alone is not sufficient.
     # Gzip also avoids Docker mistaking a leading Git PAX header for a text Dockerfile.
     with tarfile.open(snapshot, "r") as source, tarfile.open(destination, "w:gz") as target:
@@ -161,7 +240,10 @@ def build_context(snapshot, destination, dockerfile):
                     raise IntegrationError("Automatic validation cannot package an external or protected symlink. Configure a custom test image in Repositories.")
             if item.isfile() or item.isdir() or item.issym() or item.islnk():
                 target.addfile(item, source.extractfile(item) if item.isfile() else None)
-        for name, content in ((f"{CONTEXT_DIR}/Dockerfile", dockerfile), (".dockerignore", "")):
+        generated = [(f"{CONTEXT_DIR}/Dockerfile", dockerfile), (".dockerignore", "")]
+        if npmrc:
+            generated.append((".npmrc", npmrc))
+        for name, content in generated:
             data = content.encode("utf-8")
             info = tarfile.TarInfo(name)
             info.size = len(data)
@@ -227,7 +309,7 @@ def prepare_automatic_validation(repository, workspace, *, on_progress=None):
     """Publish configuration only after an image is actually ready locally."""
     plan = detect_validation(workspace)
     head = execution.git(["rev-parse", "HEAD"], cwd=workspace)
-    fingerprint = hashlib.sha256((repository.url + head + plan.dockerfile).encode()).hexdigest()[:24]
+    fingerprint = hashlib.sha256((repository.url + head + plan.dockerfile + plan.npmrc).encode()).hexdigest()[:24]
     image = f"{AUTO_IMAGE_PREFIX}{repository.pk}:{fingerprint}"
     if on_progress:
         on_progress(f"Detected {plan.label}. Preparing its test dependencies in Docker before the coding step; the first build may download packages.")
@@ -242,11 +324,23 @@ def prepare_automatic_validation(repository, workspace, *, on_progress=None):
             snapshot = Path(temporary) / "snapshot.tar"
             context = Path(temporary) / "context.tar.gz"
             execution.git(["archive", "--format=tar", "--output", str(snapshot.resolve()), "HEAD"], cwd=workspace)
-            build_context(snapshot, context, plan.dockerfile)
+            build_context(snapshot, context, plan.dockerfile, npmrc=plan.npmrc)
             try:
                 build_test_image(image, context, on_progress=on_progress)
             except IntegrationError as error:
-                raise IntegrationError(f"Automatic test environment preparation failed for {plan.label}. {error}") from None
+                # A large image can finish exporting as the client reaches its
+                # deadline. Reuse it only if Docker confirms it is local/Linux,
+                # just as for the normal cached-image path above.
+                completed = False
+                if "timed out" in str(error):
+                    try:
+                        completed = execution.command(["docker", "image", "inspect", "--format", "{{.Os}}", image], timeout=15) == "linux"
+                    except IntegrationError:
+                        pass
+                if not completed:
+                    raise IntegrationError(f"Automatic test environment preparation failed for {plan.label}. {error}") from None
+                if on_progress:
+                    on_progress("The build client reached its time limit, but Docker finished exporting the local Linux test image. Using the completed image.")
         # A successful CLI exit alone is insufficient (e.g. a remote-only builder).
         if execution.command(["docker", "image", "inspect", "--format", "{{.Os}}", image], timeout=15) != "linux":
             raise IntegrationError("The automatic test image was not loaded into the local Linux engine. Check the Docker builder configuration.")

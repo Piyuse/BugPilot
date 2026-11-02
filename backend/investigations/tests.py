@@ -104,7 +104,7 @@ class URLTests(SimpleTestCase):
         ]}), "Checkout fails\nAttributeError\n")
 
 
-@override_settings(BUGPILOT_MODE="demo", BUGPILOT_DEMO_STAGE_DELAY=0)
+@override_settings(**LIVE_SETTINGS)
 class APITests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user("dev", password="test-password")
@@ -146,11 +146,29 @@ class APITests(TestCase):
         for hint in ["checkout", "unknown"]:
             self.assertEqual(self.client.post("/api/investigations/", {"jira_ticket": "PAY-142", "repository": hint}, format="json").status_code, 400)
 
-    def test_demo_and_live_records_are_separate(self):
-        self.client.post("/api/investigations/", {"jira_ticket": "PAY-142"}, format="json")
-        with override_settings(BUGPILOT_MODE="live", **LIVE_SETTINGS):
-            self.assertEqual(self.client.post("/api/investigations/", {"jira_ticket": "PAY-142"}, format="json").status_code, 202)
-        self.assertEqual(Investigation.objects.count(), 2)
+    def test_removed_execution_mode_is_rejected_without_queuing(self):
+        response = self.client.post("/api/investigations/", {"jira_ticket": "PAY-142", "mode": "demo"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("mode", response.data)
+        self.assertFalse(Investigation.objects.exists())
+
+    def test_historical_runs_are_not_listed_counted_or_retried(self):
+        historical = Investigation.objects.create(issue_source="jira", issue_key="PAY-142", mode="demo", status="needs_attention")
+        self.assertEqual(self.client.get("/api/investigations/").data["count"], 0)
+        self.assertEqual(self.client.get("/api/overview/").data["counts"], {})
+        self.assertEqual(self.client.get(f"/api/investigations/{historical.pk}/").status_code, 404)
+        self.assertEqual(self.client.post(f"/api/investigations/{historical.pk}/retry/", {}, format="json").status_code, 404)
+        response = self.client.post("/api/investigations/", {"jira_ticket": "PAY-142"}, format="json")
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["mode"], "live")
+        self.assertNotEqual(response.data["id"], str(historical.pk))
+        historical.refresh_from_db()
+        self.assertEqual(historical.status, "needs_attention")
+
+    def test_repository_api_no_longer_exposes_fixture_flags(self):
+        response = self.client.get("/api/repositories/")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("is_demo", response.data[0])
 
     def test_registry_writes_are_staff_only(self):
         payload = {"name": "identity", "url": "https://github.com/acme/identity"}
@@ -182,7 +200,7 @@ class APITests(TestCase):
         self.assertEqual(client.post("/api/investigations/", {"jira_ticket": "PAY-142"}).status_code, 403)
 
     def test_retry_requires_failure_and_is_idempotent(self):
-        run = Investigation.objects.create(issue_source="jira", mode="demo", issue_key="PAY-142", status="needs_attention", error="Test failed")
+        run = Investigation.objects.create(issue_source="jira", mode="live", issue_key="PAY-142", status="needs_attention", error="Test failed")
         first = self.client.post(f"/api/investigations/{run.pk}/retry/", {}, format="json")
         second = self.client.post(f"/api/investigations/{run.pk}/retry/", {}, format="json")
         self.assertEqual(first.status_code, 202)
@@ -191,20 +209,20 @@ class APITests(TestCase):
         self.assertEqual(run.error, "")
 
     def test_repository_can_be_supplied_to_resolve_ambiguous_discovery(self):
-        run = Investigation.objects.create(issue_source="jira", mode="demo", issue_key="PAY-142", status="needs_attention", stage="selecting_repository")
+        run = Investigation.objects.create(issue_source="jira", mode="live", issue_key="PAY-142", status="needs_attention", stage="selecting_repository")
         response = self.client.post(f"/api/investigations/{run.pk}/retry/", {"repository": "checkout"}, format="json")
         self.assertEqual(response.status_code, 202)
         run.refresh_from_db()
         self.assertEqual(run.requested_repository, self.repository)
 
     def test_publication_retries_cannot_switch_repository(self):
-        run = Investigation.objects.create(issue_source="jira", mode="demo", issue_key="PAY-142", status="needs_attention", stage="publishing")
+        run = Investigation.objects.create(issue_source="jira", mode="live", issue_key="PAY-142", status="needs_attention", stage="publishing")
         response = self.client.post(f"/api/investigations/{run.pk}/retry/", {"repository": "checkout"}, format="json")
         self.assertEqual(response.status_code, 409)
 
     def test_status_filter_and_search(self):
-        Investigation.objects.create(issue_source="jira", mode="demo", issue_key="PAY-142", status="running", title="Checkout crash")
-        Investigation.objects.create(issue_source="jira", mode="demo", issue_key="AUTH-1", status="queued", title="Login")
+        Investigation.objects.create(issue_source="jira", mode="live", issue_key="PAY-142", status="running", title="Checkout crash")
+        Investigation.objects.create(issue_source="jira", mode="live", issue_key="AUTH-1", status="queued", title="Login")
         response = self.client.get("/api/investigations/?status=running&q=checkout")
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["issue_key"], "PAY-142")
@@ -217,21 +235,30 @@ class APITests(TestCase):
         self.assertNotIn("never-return-this-secret", response.content.decode())
 
 
-@override_settings(BUGPILOT_DEMO_STAGE_DELAY=0, **LIVE_SETTINGS)
+@override_settings(**LIVE_SETTINGS)
 class QueueAndPipelineTests(TestCase):
     def setUp(self):
         self.repository = Repository.objects.create(name="checkout-service", url="https://github.com/acme/checkout", validation_commands=[["python", "-m", "pytest"]])
 
     def test_claim_is_exclusive_and_attempts_are_counted(self):
-        run = Investigation.objects.create(issue_source="jira", mode="demo", issue_key="PAY-142")
+        run = Investigation.objects.create(issue_source="jira", mode="live", issue_key="PAY-142")
         self.assertEqual(claim_next().pk, run.pk)
         self.assertIsNone(claim_next())
         run.refresh_from_db()
         self.assertEqual(run.attempt, 1)
         self.assertEqual(run.status, "running")
 
+    def test_worker_leaves_historical_queued_runs_untouched(self):
+        historical = Investigation.objects.create(issue_source="jira", mode="demo", issue_key="PAY-142")
+        live = Investigation.objects.create(issue_source="jira", issue_key="PAY-143")
+        self.assertEqual(claim_next().pk, live.pk)
+        self.assertIsNone(claim_next())
+        historical.refresh_from_db()
+        self.assertEqual(historical.status, "queued")
+        self.assertEqual(historical.attempt, 0)
+
     def test_expired_worker_moves_job_to_attention(self):
-        run = Investigation.objects.create(issue_source="jira", mode="demo", issue_key="PAY-142", status="running", heartbeat_at=timezone.now() - timedelta(hours=1))
+        run = Investigation.objects.create(issue_source="jira", mode="live", issue_key="PAY-142", status="running", heartbeat_at=timezone.now() - timedelta(hours=1))
         recover_stale()
         run.refresh_from_db()
         self.assertEqual(run.status, "needs_attention")
@@ -240,30 +267,30 @@ class QueueAndPipelineTests(TestCase):
     @patch("investigations.pipeline.GitHubClient")
     @patch("investigations.pipeline.OpenAIPreprocessor")
     @patch("investigations.pipeline.JiraClient")
-    def test_demo_never_contacts_providers(self, jira, openai, github):
-        run = Investigation.objects.create(issue_source="jira", mode="demo", issue_key="PAY-142")
-        claimed = claim_next()
-        result = run_investigation(claimed.pk)
+    def test_historical_execution_mode_cannot_call_providers(self, jira, openai, github):
+        run = Investigation.objects.create(issue_source="jira", mode="demo", issue_key="PAY-142", status="running")
+        result = run_investigation(run.pk)
         run.refresh_from_db()
-        self.assertEqual(result["status"], "pr_created")
+        self.assertEqual(result["status"], "needs_attention")
+        self.assertIn("historical investigation", run.error)
         self.assertEqual(run.pull_request_url, "")
         self.assertFalse(run.issue_linked)
-        self.assertTrue(run.validation["simulated"])
-        self.assertEqual(run.events.count(), 10)
         jira.assert_not_called()
         openai.assert_not_called()
         github.assert_not_called()
 
-    def test_management_worker_processes_queued_job(self):
-        run = Investigation.objects.create(issue_source="jira", mode="demo", issue_key="PAY-142")
+    @patch("investigations.management.commands.runworker.run_investigation", return_value={"status": "running"})
+    def test_management_worker_processes_queued_job(self, pipeline):
+        run = Investigation.objects.create(issue_source="jira", mode="live", issue_key="PAY-142")
         call_command("runworker", once=True, stdout=StringIO())
         run.refresh_from_db()
-        self.assertEqual(run.status, "pr_created")
+        pipeline.assert_called_once_with(run.pk)
+        self.assertEqual(run.status, "running")
         self.assertTrue(WorkerHeartbeat.objects.filter(pk=1).exists())
 
     def test_repository_matching_uses_readme_context_and_allowlist(self):
         Repository.objects.create(name="identity", url="https://github.com/acme/identity")
-        run = Investigation.objects.create(issue_source="jira", mode="demo", issue_key="PAY-142", preprocessed={"summary": "Checkout"})
+        run = Investigation.objects.create(issue_source="jira", mode="live", issue_key="PAY-142", preprocessed={"summary": "Checkout"})
         github, openai = MagicMock(), MagicMock()
         github.context.side_effect = lambda repo: {"id": repo.pk, "readme": "context"}
         openai.select.return_value = {"repository_id": self.repository.pk, "reason": "checkout owns pricing"}
@@ -362,20 +389,20 @@ class QueueAndPipelineTests(TestCase):
     def test_inactive_explicit_repository_stops_investigation(self):
         self.repository.is_active = False
         self.repository.save()
-        run = Investigation.objects.create(issue_source="jira", mode="demo", issue_key="PAY-142", requested_repository=self.repository)
+        run = Investigation.objects.create(issue_source="jira", mode="live", issue_key="PAY-142", requested_repository=self.repository)
         claim_next()
         run_investigation(run.pk)
         run.refresh_from_db()
         self.assertEqual(run.status, "needs_attention")
 
-    @patch("investigations.pipeline.run_demo")
-    def test_worker_that_loses_its_lease_cannot_fail_a_new_attempt(self, demo):
-        run = Investigation.objects.create(issue_source="jira", mode="demo", issue_key="PAY-142")
+    @patch("investigations.pipeline.run_live")
+    def test_worker_that_loses_its_lease_cannot_fail_a_new_attempt(self, live):
+        run = Investigation.objects.create(issue_source="jira", mode="live", issue_key="PAY-142")
         claim_next()
         def lose_lease(claimed):
             Investigation.objects.filter(pk=claimed.pk).update(attempt=2)
             raise IntegrationError("This worker no longer owns the investigation.")
-        demo.side_effect = lose_lease
+        live.side_effect = lose_lease
         run_investigation(run.pk)
         run.refresh_from_db()
         self.assertEqual(run.status, "running")
