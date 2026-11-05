@@ -104,9 +104,10 @@ def retry_investigation(request, pk):
         issue_input = {"github_issue": run.issue_url} if run.issue_source == "github" else {"jira_ticket": run.issue_key}
         serializer = SubmissionSerializer(data={**issue_input, "repository": request.data["repository"], "mode": run.mode})
         serializer.is_valid(raise_exception=True)
-        if run.pull_request_url or run.stage in {"publishing", "linking_jira", "linking_issue"}:
+        if run.pull_request_url or run.publication_attempt or run.stage in {"publishing", "linking_jira", "linking_issue"}:
             return Response({"detail": "The publication step has started. Retry with the same repository to recover its pull request."}, status=409)
-        changes = {"requested_repository": serializer.validated_data["repository"], "repository": None, "base_branch": "", "base_sha": ""}
+        changes = {"requested_repository": serializer.validated_data["repository"], "repository": None, "base_branch": "", "base_sha": "",
+                   "validation": {}, "proposal": {}, "model_calls": {}}
     if not Investigation.objects.filter(pk=pk, status="needs_attention").update(status="queued", stage="queued", error="", finished_at=None, updated_at=timezone.now(), **changes):
         return Response({"detail": "Only investigations that need attention can be retried."}, status=409)
     InvestigationEvent.objects.create(investigation=run, stage="queued", message="Retry queued. Any existing pull request will be recovered before continuing.")
