@@ -209,11 +209,14 @@ class APITests(TestCase):
         self.assertEqual(run.error, "")
 
     def test_repository_can_be_supplied_to_resolve_ambiguous_discovery(self):
-        run = Investigation.objects.create(issue_source="jira", mode="live", issue_key="PAY-142", status="needs_attention", stage="selecting_repository")
+        run = Investigation.objects.create(issue_source="jira", mode="live", issue_key="PAY-142", status="needs_attention", stage="selecting_repository",
+                                           validation={"workspace_attempt": 1}, proposal={"summary": "Old patch"})
         response = self.client.post(f"/api/investigations/{run.pk}/retry/", {"repository": "checkout"}, format="json")
         self.assertEqual(response.status_code, 202)
         run.refresh_from_db()
         self.assertEqual(run.requested_repository, self.repository)
+        self.assertEqual(run.validation, {})
+        self.assertEqual(run.proposal, {})
 
     def test_publication_retries_cannot_switch_repository(self):
         run = Investigation.objects.create(issue_source="jira", mode="live", issue_key="PAY-142", status="needs_attention", stage="publishing")
@@ -507,25 +510,33 @@ class RealGitValidationTests(SimpleTestCase):
 
     def test_real_patch_checks_run_in_networkless_container(self):
         (self.workspace / "pricing.py").write_text("total = discount.amount if discount else 0\n")
+        (self.workspace / "test_pricing.py").write_text("assert True\n")
         original_command = execution.command
         seen = []
         def intercept(argv, **kwargs):
             if argv[0] == "docker":
                 if argv[1] in {"info", "image"}:
                     return "linux"
+                if argv[1] == "inspect":
+                    return '{"Running": false, "ExitCode": 0, "OOMKilled": false}'
                 seen.append(argv)
                 return "2 passed"
             return original_command(argv, **kwargs)
         with patch("investigations.execution.command", side_effect=intercept), patch("investigations.execution.subprocess.run"):
             result = execution.validate_proposal(self.run, self.workspace)
         self.assertTrue(result["passed"])
-        self.assertEqual(result["changed_files"], ["pricing.py"])
+        self.assertEqual(result["changed_files"], ["pricing.py", "test_pricing.py"])
+        import tarfile
+        with tarfile.open(self.workspace.parent / "validation-attempt-1" / "source.tar") as snapshot:
+            self.assertEqual(set(snapshot.getnames()), {"pricing.py", "test_pricing.py"})
+            self.assertIn(b"if discount else 0", snapshot.extractfile("pricing.py").read())
         self.assertIn("none", seen[0])
         self.assertIn("--read-only", seen[0])
         self.assertIn("no-new-privileges", seen[0])
         self.assertIn("type=volume,target=/work", seen[0])
         self.assertNotIn("/work:rw,exec,size=1g", seen[0])
         self.assertEqual(seen[0][-3:], ["python", "-m", "pytest"])
+        self.assertIn("tar -xf /source.tar -C /work", seen[0][-5])
 
     def test_test_failure_stops_validation(self):
         (self.workspace / "pricing.py").write_text("total = 0\n")

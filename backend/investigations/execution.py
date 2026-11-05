@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -33,7 +34,14 @@ def clean_environment():
     return {key: value for key, value in os.environ.items() if key.upper() in keys}
 
 
-def command(argv, *, cwd=None, env=None, timeout=120, stdin=None, operation=None):
+class CommandError(IntegrationError):
+    def __init__(self, message, *, output="", timed_out=False):
+        super().__init__(message)
+        self.output = output
+        self.timed_out = timed_out
+
+
+def command(argv, *, cwd=None, env=None, timeout=120, stdin=None, operation=None, log_path=None):
     if not argv or not isinstance(argv, list):
         raise IntegrationError("Command must be an argument list.")
     creation = {"start_new_session": True} if os.name != "nt" else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
@@ -43,6 +51,15 @@ def command(argv, *, cwd=None, env=None, timeout=120, stdin=None, operation=None
     with ExitStack() as stack:
         output = stack.enter_context(tempfile.TemporaryFile(dir=output_root))
         input_file = stack.enter_context(stdin.open("rb")) if isinstance(stdin, Path) else None
+        def captured_output():
+            output.seek(0, 2)
+            output.seek(max(0, output.tell() - 24000))
+            text = redact(output.read().decode("utf-8", errors="replace")).strip()
+            if log_path is not None:
+                path = Path(log_path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            return text
         try:
             process = subprocess.Popen(argv, cwd=cwd, env=env or clean_environment(), stdin=input_file if input_file is not None else subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
                                        stdout=output, stderr=subprocess.STDOUT, **creation)
@@ -54,13 +71,13 @@ def command(argv, *, cwd=None, env=None, timeout=120, stdin=None, operation=None
                 else:
                     os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
-                raise IntegrationError(f"{operation or Path(argv[0]).name} timed out after {timeout} seconds.") from None
-            output.seek(0, 2)
-            length = output.tell()
-            output.seek(max(0, length - 24000))
-            text = redact(output.read().decode("utf-8", errors="replace"))
+                text = captured_output()
+                details = "\nLast output:\n" + text[-6000:] if text else "\nNo process output was captured."
+                raise CommandError(f"{operation or Path(argv[0]).name} timed out after {timeout} seconds." + details,
+                                   output=text, timed_out=True) from None
+            text = captured_output()
             if process.returncode:
-                raise IntegrationError(f"{Path(argv[0]).name} exited with code {process.returncode}.\n{text[-6000:]}")
+                raise CommandError(f"{Path(argv[0]).name} exited with code {process.returncode}.\n{text[-6000:]}", output=text)
             return text.strip()
         except FileNotFoundError:
             raise IntegrationError(f"Required executable is not installed: {Path(argv[0]).name}.") from None
@@ -212,7 +229,95 @@ def investigate_and_fix(run, workspace):
         raise IntegrationError("Codex did not produce a valid fix summary.") from None
 
 
-def validate_proposal(run, workspace):
+def run_validation_check(run, workspace, check, index, *, on_progress=None, source_archive=None):
+    name = f"bugpilot-{run.pk.hex[:12]}-{run.attempt}-{index}"
+    artifacts = workspace.parent / f"validation-attempt-{run.attempt}"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    copy_source = "tar -xf /source.tar -C /work" if source_archive else "cp -a /source/. /work/"
+    source_mount = (f"type=bind,source={source_archive.resolve()},target=/source.tar,readonly" if source_archive
+                    else f"type=bind,source={workspace.resolve()},target=/source,readonly")
+    return run_container_check(run.repository.runtime_image, check, name=name, label=f"Regression check {index + 1}",
+                               source_mount=source_mount, copy_source=copy_source, on_progress=on_progress,
+                               log_path=artifacts / f"check-{index + 1}.log",
+                               setup_log_path=artifacts / f"check-{index + 1}-setup.log")
+
+
+def run_container_check(image, check, *, name, label, source_mount=None, copy_source=None,
+                        on_progress=None, log_path=None, setup_log_path=None):
+    """Run against the image snapshot or overlay a proposed source tree."""
+    started = time.monotonic()
+    phase = "container_setup"
+    state = {}
+    output = ""
+    result = {"command": check, "passed": False}
+    if log_path is not None:
+        result["log_path"] = str(log_path.resolve())
+    script = 'cd /work && printf "BUGPILOT_PHASE=running_tests\\n" && exec "$@"'
+    if copy_source:
+        script = 'printf "BUGPILOT_PHASE=copying_source\\n"; ' + copy_source + ' && ' + script
+    argv = ["docker", "create", "--pull", "never", "--name", name, "--network", "none", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges", "--pids-limit", "256", "--memory", settings.BUGPILOT_TEST_MEMORY, "--cpus", "2",
+            "--read-only", "--tmpfs", "/tmp:rw,exec,size=256m", "--mount", "type=volume,target=/work"]
+    if source_mount:
+        argv.extend(["--mount", source_mount])
+    argv.extend(["--entrypoint", "sh", image, "-c", script, "--", *check])
+    try:
+        if on_progress:
+            on_progress(f"{label}: preparing its Docker container and writable workspace (up to {settings.BUGPILOT_CONTAINER_SETUP_TIMEOUT}s).")
+        command(argv, timeout=settings.BUGPILOT_CONTAINER_SETUP_TIMEOUT, operation="Docker validation container setup",
+                log_path=setup_log_path)
+        result["setup_seconds"] = round(time.monotonic() - started, 2)
+        phase = "tests"
+        if on_progress:
+            on_progress(f"{label}: container prepared in {result['setup_seconds']}s. Running {' '.join(check)} (up to {settings.BUGPILOT_TEST_TIMEOUT}s).")
+        output = command(["docker", "start", "--attach", name], timeout=settings.BUGPILOT_TEST_TIMEOUT,
+                         operation=label, log_path=log_path)
+        state = json.loads(command(["docker", "inspect", "--format", "{{json .State}}", name], timeout=15))
+        if not isinstance(state, dict) or state.get("Running") is not False or type(state.get("ExitCode")) is not int:
+            raise IntegrationError("Docker did not confirm that the regression check finished.")
+        if state.get("OOMKilled"):
+            raise IntegrationError(f"Regression check exceeded its Docker memory limit ({settings.BUGPILOT_TEST_MEMORY}).")
+        if state["ExitCode"] != 0:
+            raise IntegrationError(f"Regression check exited with code {state['ExitCode']}.")
+        result.update(passed=True, output=output[-6000:], elapsed_seconds=round(time.monotonic() - started, 2))
+        return result
+    except (IntegrationError, ValueError) as error:
+        if not state:
+            try:
+                state = json.loads(command(["docker", "inspect", "--format", "{{json .State}}", name], timeout=15))
+            except (IntegrationError, ValueError):
+                state = {}
+        if not isinstance(state, dict):
+            state = {}
+        output = getattr(error, "output", "") or output
+        try:
+            output = command(["docker", "logs", "--tail", "100", name], timeout=15) or output
+        except IntegrationError:
+            pass
+        output = redact(output)[-24000:]
+        if log_path is not None:
+            log_path.write_text(output, encoding="utf-8")
+        timed_out = getattr(error, "timed_out", False)
+        if "BUGPILOT_PHASE=copying_source" in output and "BUGPILOT_PHASE=running_tests" not in output:
+            phase = "source_copy"
+        reason = redact(str(error).partition("\n")[0] if isinstance(error, CommandError) else str(error))
+        if state.get("OOMKilled"):
+            reason = f"Regression check exceeded its Docker memory limit ({settings.BUGPILOT_TEST_MEMORY})."
+        result.update(output=output[-6000:], phase=phase, timed_out=timed_out,
+                      oom_killed=state.get("OOMKilled", False), exit_code=state.get("ExitCode"),
+                      elapsed_seconds=round(time.monotonic() - started, 2), reason=reason)
+        failure = IntegrationError(reason + ("\nLast container output:\n" + output[-6000:] if output else ""))
+        failure.check_result = result
+        raise failure from None
+    finally:
+        try:
+            subprocess.run(["docker", "rm", "-f", "-v", name], env=clean_environment(), stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=20, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def validate_proposal(run, workspace, *, on_progress=None):
     # Include newly created files in the patch, but never publish secret/config changes.
     git(["add", "--all"], cwd=workspace)
     changed = git(["diff", "--cached", "--name-only", run.base_sha], cwd=workspace).splitlines()
@@ -233,29 +338,32 @@ def validate_proposal(run, workspace):
     rows = [line.split("\t", 2) for line in numstat.splitlines()]
     if any(row[0] == "-" for row in rows) or sum(int(row[0]) + int(row[1]) for row in rows) > 3000:
         raise IntegrationError("The patch contains binary files or exceeds 3,000 changed lines and needs manual review.")
-    checks = run.repository.validation_commands
+    from .validation_profiles import scoped_checks
+    added = git(["diff", "--cached", "--name-only", "--diff-filter=A", run.base_sha], cwd=workspace).splitlines()
+    checks, scope = scoped_checks(run.repository, workspace, changed, set(added))
     if not checks:
         raise IntegrationError("Configure repository validation commands before running a live investigation.")
+    if scope and on_progress:
+        on_progress("Validation scope: " + scope)
     ensure_validation_runtime(run.repository)
+    # A single archive avoids one host/VM filesystem round trip per source file.
+    # Export the exact staged tree, including new regression tests, without Git
+    # metadata or ignored/untracked dependency folders from the worker host.
+    validated_tree = git(["write-tree"], cwd=workspace)
+    artifacts = workspace.parent / f"validation-attempt-{run.attempt}"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    source_archive = artifacts / "source.tar"
+    git(["archive", "--format=tar", "--output", str(source_archive.resolve()), validated_tree], cwd=workspace)
     results = []
     for index, check in enumerate(checks):
-        name = f"bugpilot-{run.pk.hex[:12]}-{run.attempt}-{index}"
-        argv = ["docker", "run", "--pull", "never", "--rm", "--name", name, "--network", "none", "--cap-drop", "ALL",
-                "--security-opt", "no-new-privileges", "--pids-limit", "256", "--memory", settings.BUGPILOT_TEST_MEMORY, "--cpus", "2",
-                "--read-only", "--tmpfs", "/tmp:rw,exec,size=256m", "--mount", "type=volume,target=/work",
-                "--mount", f"type=bind,source={workspace.resolve()},target=/source,readonly",
-                "--entrypoint", "sh", run.repository.runtime_image,
-                "-c", 'cp -a /source/. /work/ && cd /work && exec "$@"', "--", *check]
         try:
-            log = command(argv, timeout=settings.BUGPILOT_TEST_TIMEOUT)
-            results.append({"command": check, "passed": True, "output": log[-6000:]})
-        finally:
-            # A timed-out docker client can leave the container running.
-            try:
-                subprocess.run(["docker", "rm", "-f", "-v", name], env=clean_environment(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20, check=False)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-    return {"passed": True, "checks": results, "changed_files": changed, "validated_tree": git(["write-tree"], cwd=workspace)}
+            results.append(run_validation_check(run, workspace, check, index, on_progress=on_progress, source_archive=source_archive))
+        except IntegrationError as error:
+            failed = getattr(error, "check_result", {"command": check, "passed": False, "output": redact(str(error))})
+            error.validation = {"passed": False, "reason": redact(str(error)), "checks": [*results, failed],
+                                "changed_files": changed, "workspace_attempt": run.attempt, "scope": scope}
+            raise
+    return {"passed": True, "checks": results, "changed_files": changed, "validated_tree": validated_tree, "scope": scope}
 
 
 def publish_pull_request(run, workspace, github):
@@ -281,12 +389,13 @@ def publish_pull_request(run, workspace, github):
     except IntegrationError as error:
         raise IntegrationError(f"Could not push the validated fix to {run.publication_repository_url}. GITHUB_TOKEN needs Contents read/write access to that repository. {error}") from None
     checks = "\n".join("- `" + " ".join(check["command"]) + "`" for check in run.validation["checks"])
+    scope_note = f"Scope: {run.validation['scope']}\n\n" if run.validation.get("scope") else ""
     issue_reference = f"Fixes {run.issue_key}" if run.issue_source == "github" else f"Fixes [{run.issue_key}]({run.issue_url})"
     body = (
         f"{issue_reference}\n\n"
         f"## Change\n{run.proposal['summary']}\n\n"
         f"## Root cause\n{run.proposal['root_cause']}\n\n"
-        f"## Validation\n{checks}\n\n"
+        f"## Validation\n{checks}\n\n{scope_note}"
         f"Generated by BugPilot. A developer must review and merge this PR.\n"
         f"Investigation: `{run.pk}`"
     )

@@ -93,7 +93,7 @@ class PublicationRecoveryTests(TestCase):
         self.temp = tempfile.TemporaryDirectory(dir=root)
         self.addCleanup(self.temp.cleanup)
         self.enterContext(override_settings(BUGPILOT_WORKSPACE_ROOT=Path(self.temp.name)))
-        self.repository = Repository.objects.create(name="project", url="https://github.com/upstream/project")
+        self.repository = Repository.objects.create(name="project", url="https://github.com/upstream/project", validation_commands=[["pytest"]])
         self.run = Investigation.objects.create(issue_key="upstream/project#1", source_repository_url=self.repository.url,
             source_issue_number=1, repository=self.repository, status="running", attempt=3, publication_attempt=2,
             publication_head_owner="contributor", branch="codex/fix", base_branch="trunk", base_sha="a" * 40, validation={"passed": True}, proposal={"summary": "Fix"})
@@ -139,6 +139,96 @@ class PublicationRecoveryTests(TestCase):
         self.assertEqual(self.run.status, "pr_created")
         executor.publish_pull_request.assert_not_called()
         executor.validate_proposal.assert_not_called()
+
+    @patch("investigations.pipeline.OpenAIPreprocessor")
+    @patch("investigations.pipeline.execution")
+    @patch("investigations.pipeline.GitHubClient")
+    def test_validation_timeout_retry_reuses_patch_without_models(self, github, executor, model):
+        self.run.publication_attempt = 0
+        self.run.validation = {"passed": False, "workspace_attempt": 2}
+        self.run.save()
+        github.return_value.existing_pull_request.return_value = None
+        github.return_value.comment_issue_pull_request.return_value = {"id": "1", "url": "comment"}
+        executor.validate_proposal.return_value = {"passed": True, "validated_tree": "a" * 40}
+        executor.publish_pull_request.return_value = {"html_url": self.repository.url + "/pull/1"}
+        run_investigation(self.run.pk)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, "pr_created")
+        self.assertEqual(self.run.publication_attempt, 2)
+        self.assertEqual(executor.validate_proposal.call_args.args[1], self.workspace)
+        executor.prepare_workspace.assert_not_called()
+        executor.investigate_and_fix.assert_not_called()
+        model.assert_not_called()
+
+    @patch("investigations.pipeline.execution")
+    @patch("investigations.pipeline.GitHubClient")
+    def test_repeated_validation_failure_keeps_original_workspace_and_diagnostics(self, github, executor):
+        self.run.publication_attempt = 0
+        self.run.validation = {"passed": False, "workspace_attempt": 2}
+        self.run.save()
+        github.return_value.existing_pull_request.return_value = None
+        executor.redact.side_effect = lambda value: value
+        error = IntegrationError("timeout")
+        error.validation = {"passed": False, "workspace_attempt": 3, "checks": [{"output": "test started", "timed_out": True}]}
+        executor.validate_proposal.side_effect = error
+        run_investigation(self.run.pk)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, "needs_attention")
+        self.assertEqual(self.run.validation["workspace_attempt"], 2)
+        self.assertEqual(self.run.validation["checks"][0]["output"], "test started")
+        executor.publish_pull_request.assert_not_called()
+
+    @patch("investigations.pipeline.OpenAIPreprocessor")
+    @patch("investigations.pipeline.execution")
+    @patch("investigations.pipeline.GitHubClient")
+    def test_missing_saved_patch_does_not_start_a_replacement_model_run(self, github, executor, model):
+        self.run.publication_attempt = 0
+        self.run.validation = {"passed": False, "workspace_attempt": 2}
+        self.run.save()
+        self.workspace.rmdir()
+        github.return_value.existing_pull_request.return_value = None
+        executor.redact.side_effect = lambda value: value
+        run_investigation(self.run.pk)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, "needs_attention")
+        self.assertIn("workspace is missing", self.run.error)
+        executor.prepare_workspace.assert_not_called()
+        model.assert_not_called()
+
+    @patch("investigations.pipeline.OpenAIPreprocessor")
+    @patch("investigations.pipeline.execution")
+    @patch("investigations.pipeline.GitHubClient")
+    def test_invalid_checkpoint_is_rejected_before_accessing_a_workspace(self, github, executor, model):
+        self.run.publication_attempt = 0
+        self.run.validation = {"workspace_attempt": "../../other"}
+        self.run.save()
+        github.return_value.existing_pull_request.return_value = None
+        executor.redact.side_effect = lambda value: value
+        run_investigation(self.run.pk)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, "needs_attention")
+        self.assertIn("checkpoint is invalid", self.run.error)
+        executor.validate_proposal.assert_not_called()
+        model.assert_not_called()
+
+    @patch("investigations.pipeline.prepare_automatic_validation")
+    @patch("investigations.pipeline.execution")
+    @patch("investigations.pipeline.GitHubClient")
+    def test_saved_patch_refreshes_automatic_environment_before_running_checks(self, github, executor, prepare):
+        self.repository.runtime_image = "bugpilot-auto-1:old-recipe"
+        self.repository.save()
+        order = []
+        prepare.side_effect = lambda *args, **kwargs: order.append("prepare")
+        executor.validate_proposal.side_effect = lambda *args, **kwargs: order.append("validate") or {"passed": True, "validated_tree": "a" * 40}
+        executor.publish_pull_request.return_value = {"html_url": self.repository.url + "/pull/1"}
+        github.return_value.existing_pull_request.return_value = None
+        github.return_value.comment_issue_pull_request.return_value = {"id": "1", "url": "comment"}
+        run_investigation(self.run.pk)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, "pr_created")
+        self.assertEqual(order, ["prepare", "validate"])
+        prepare.assert_called_once()
+        executor.investigate_and_fix.assert_not_called()
 
 
 class ForkPushTests(SimpleTestCase):

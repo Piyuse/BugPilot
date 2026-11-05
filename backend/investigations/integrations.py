@@ -353,8 +353,28 @@ class GitHubClient:
             f"**Branch:** `{branch}`\n\n{summary[:2000] or 'See the pull request description.'}\n\n"
             f"**Validation:** {note}\n\nPlease review and merge the pull request. No changes have been merged.\n\n{marker}"
         )
-        comment = self.call("POST", path, {"body": body})
+        try:
+            comment = self.call("POST", path, {"body": body})
+        except IntegrationError as error:
+            if error.status_code == 403:
+                # A valid token can still be refused on a locked conversation.
+                # Diagnose after refusal so authorized collaborators may comment,
+                # and keep unrelated permission/rate-limit failures unchanged.
+                try:
+                    issue = self.call("GET", f"/repos/{slug}/issues/{int(number)}")
+                except IntegrationError:
+                    issue = {}
+                if isinstance(issue, dict) and issue.get("locked") is True:
+                    raise IntegrationError(self.locked_issue_comment_message(repository_url, number, url), status_code=403) from None
+            raise
         return self._issue_comment_reference(repository_url, number, comment)
+
+    @staticmethod
+    def locked_issue_comment_message(repository_url, number, pull_request_url):
+        return (f"Pull request already created: {pull_request_url}. "
+                f"GitHub refused its link comment because issue {normalize_repository_url(repository_url)}/issues/{int(number)} "
+                "is locked (HTTP 403). A repository maintainer must unlock the conversation, or an authorized collaborator "
+                "must post the comment. The existing fix and PR are preserved; a replacement token alone cannot remove the issue lock.")
 
     @staticmethod
     def _issue_comment_reference(repository_url, number, comment):

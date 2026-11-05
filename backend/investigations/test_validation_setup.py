@@ -14,7 +14,8 @@ from .integrations import IntegrationError
 from .models import Investigation, Repository
 from .pipeline import run_investigation
 from .tests import LIVE_SETTINGS
-from .validation_setup import automatic_validation, build_context, build_test_image, detect_validation, prepare_automatic_validation, transient_builder_error
+from .validation_setup import (automatic_validation, build_context, build_test_image, detect_validation,
+                               prepare_automatic_validation, transient_builder_error, verify_python_collection)
 
 
 class DetectionTests(SimpleTestCase):
@@ -99,6 +100,31 @@ class DetectionTests(SimpleTestCase):
         self.assertIn("python:3.13.2-bookworm", plan.dockerfile)
         self.assertIn('"-r", "requirements.txt"', plan.dockerfile)
         self.assertIn('"-e", ".[test]"', plan.dockerfile)
+
+    def test_legacy_python_tests_get_cpu_torch_only_if_not_already_installed(self):
+        self.write("setup.py", "from setuptools import setup\nsetup(name='legacy-project')\n")
+        self.write("test/test_engine.py", "from torch import Tensor\nimport undeclared_package_name\n")
+        plan = detect_validation(self.workspace)
+        self.assertTrue(plan.python_collection)
+        self.assertIn("find_spec('torch') is None", plan.dockerfile)
+        self.assertIn("https://download.pytorch.org/whl/cpu", plan.dockerfile)
+        self.assertIn("torch==2.9.1+cpu", plan.dockerfile)
+        self.assertLess(plan.dockerfile.index('"-e", "."'), plan.dockerfile.index("find_spec"))
+        self.assertNotIn("undeclared_package_name", plan.dockerfile)
+
+    def test_nested_test_requirements_are_installed_without_guessing_optional_imports(self):
+        self.write("tests/requirements.txt", "numpy==2.1.0\n")
+        self.write("tests/nested/test_engine.py", "import pytest\ntorch = pytest.importorskip('torch')\n")
+        plan = detect_validation(self.workspace)
+        self.assertIn('"-r", "tests/requirements.txt"', plan.dockerfile)
+        self.assertNotIn("download.pytorch.org", plan.dockerfile)
+        self.assertTrue(plan.python_collection)
+
+    def test_torch_heuristic_does_not_add_packages_to_frozen_uv_projects(self):
+        self.write("pyproject.toml", '[project]\nname="application"\nversion="0.1"\n')
+        self.write("uv.lock", "version=1\n")
+        self.write("test/test_engine.py", "import torch\n")
+        self.assertNotIn("download.pytorch.org", detect_validation(self.workspace).dockerfile)
 
     def test_flat_uv_project_syncs_cpu_and_dev_dependencies_without_packaging(self):
         self.write("pyproject.toml", '''[project]
@@ -367,6 +393,54 @@ class AutomaticValidationPipelineTests(TestCase):
         self.repository.validation_commands = [["custom", "check"]]
         self.repository.runtime_image = "team/prepared:ready"
         self.assertFalse(automatic_validation(self.repository))
+
+    @patch("investigations.validation_setup.execution.run_container_check")
+    @patch("investigations.validation_setup.execution.git", return_value="a" * 40)
+    @patch("investigations.validation_setup.execution.command", return_value="linux")
+    def test_cached_python_image_must_collect_before_configuration_is_saved(self, command, git, collect):
+        failure = IntegrationError("pytest interrupted collection")
+        failure.check_result = {"exit_code": 2, "phase": "tests", "output": "ModuleNotFoundError: No module named 'example_lib'"}
+        collect.side_effect = failure
+        with tempfile.TemporaryDirectory(dir=settings.BASE_DIR / ".test-tmp") as root:
+            workspace = Path(root)
+            (workspace / "pytest.ini").write_text("[pytest]\n")
+            with self.assertRaisesMessage(IntegrationError, "Missing imports: example_lib"):
+                prepare_automatic_validation(self.repository, workspace)
+        self.repository.refresh_from_db()
+        self.assertEqual(self.repository.validation_commands, [])
+        self.assertEqual(self.repository.runtime_image, "python:3.12-slim")
+        self.assertIn("--collect-only", collect.call_args.args[1])
+        self.assertNotIn("source_mount", collect.call_args.kwargs)
+
+
+class PythonCollectionTests(SimpleTestCase):
+    @patch("investigations.validation_setup.execution.run_container_check")
+    def test_clean_base_with_no_tests_can_proceed_to_agent(self, check):
+        failure = IntegrationError("pytest exited 5")
+        failure.check_result = {"phase": "tests", "exit_code": 5, "output": "no tests collected"}
+        check.side_effect = failure
+        progress = []
+        verify_python_collection("prepared:python", on_progress=progress.append)
+        self.assertIn("must add a passing test", progress[-1])
+
+    @patch("investigations.validation_setup.execution.run_container_check")
+    def test_timed_out_collection_is_not_treated_as_no_tests(self, check):
+        failure = IntegrationError("timed out")
+        failure.check_result = {"phase": "tests", "exit_code": 5, "timed_out": True}
+        check.side_effect = failure
+        with self.assertRaisesMessage(IntegrationError, "timed out"):
+            verify_python_collection("prepared:python")
+
+    @patch("investigations.validation_setup.execution.run_container_check")
+    def test_baseline_source_collection_error_can_be_fixed_by_agent(self, check):
+        failure = IntegrationError("pytest interrupted collection")
+        failure.check_result = {"phase": "tests", "exit_code": 2,
+                                "output": "SyntaxError: invalid syntax\nInterrupted: 1 error during collection"}
+        check.side_effect = failure
+        progress = []
+        verify_python_collection("prepared:python", on_progress=progress.append)
+        self.assertIn("proposed fix must resolve", progress[-1])
+        self.assertIn("SyntaxError", progress[-1])
 
 
 class BuilderRecoveryTests(SimpleTestCase):

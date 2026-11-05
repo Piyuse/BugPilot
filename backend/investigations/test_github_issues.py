@@ -153,6 +153,42 @@ class GitHubIssueProviderTests(SimpleTestCase):
         self.assertEqual(call.call_count, 1)
         self.assertEqual(call.call_args.args[0], "GET")
 
+    @patch.object(GitHubClient, "call")
+    def test_locked_comment_refusal_reports_existing_pr_and_maintainer_action(self, call):
+        call.side_effect = [[], IntegrationError("Forbidden", status_code=403), {"locked": True}]
+        with self.assertRaisesMessage(IntegrationError, "is locked") as caught:
+            GitHubClient().comment_issue_pull_request("https://github.com/acme/checkout", 123,
+                "https://github.com/acme/checkout/pull/7", "Fix", investigation_id="run-123",
+                branch="branch", summary="", validation={})
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertIn("https://github.com/acme/checkout/pull/7", str(caught.exception))
+        self.assertIn("maintainer must unlock", str(caught.exception))
+        self.assertEqual(call.call_args.args, ("GET", "/repos/acme/checkout/issues/123"))
+        self.assertEqual(sum(item.args[0] == "POST" for item in call.call_args_list), 1)
+
+    @patch.object(GitHubClient, "call")
+    def test_other_comment_refusals_keep_original_failure(self, call):
+        for metadata in ({"locked": False}, IntegrationError("Metadata unavailable"), []):
+            with self.subTest(metadata=metadata):
+                original = IntegrationError("Original permission or rate limit failure", status_code=403)
+                call.side_effect = [[], original, metadata]
+                with self.assertRaises(IntegrationError) as caught:
+                    GitHubClient().comment_issue_pull_request("https://github.com/acme/checkout", 123,
+                        "https://github.com/acme/checkout/pull/7", "Fix", investigation_id="run-123",
+                        branch="branch", summary="", validation={})
+                self.assertIs(caught.exception, original)
+
+    @patch.object(GitHubClient, "call")
+    def test_non_403_failure_does_not_trigger_lock_probe_or_replay_post(self, call):
+        original = IntegrationError("Response interrupted", status_code=503)
+        call.side_effect = [[], original]
+        with self.assertRaises(IntegrationError) as caught:
+            GitHubClient().comment_issue_pull_request("https://github.com/acme/checkout", 123,
+                "https://github.com/acme/checkout/pull/7", "Fix", investigation_id="run-123",
+                branch="branch", summary="", validation={})
+        self.assertIs(caught.exception, original)
+        self.assertEqual(call.call_count, 2)
+
 
 @override_settings(**{**LIVE_SETTINGS, "JIRA_BASE_URL": "", "JIRA_EMAIL": "", "JIRA_API_TOKEN": ""})
 class GitHubIssuePipelineTests(TestCase):

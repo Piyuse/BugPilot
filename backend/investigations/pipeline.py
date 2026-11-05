@@ -93,22 +93,30 @@ def run_live(run):
             run.pull_request_url = existing["html_url"]
             run.save(update_fields=["pull_request_url", "updated_at"])
 
-    if not run.pull_request_url and run.publication_attempt:
+    saved_attempt = run.publication_attempt or run.validation.get("workspace_attempt")
+    if not run.pull_request_url and saved_attempt:
+        if type(saved_attempt) is not int or not 0 < saved_attempt <= run.attempt:
+            raise IntegrationError("The saved validation workspace checkpoint is invalid.")
         if not run.repository_id or not run.base_sha:
             raise IntegrationError("The publication checkpoint has no validated fix. No code was pushed.")
-        workspace = Path(settings.BUGPILOT_WORKSPACE_ROOT) / str(run.pk) / f"attempt-{run.publication_attempt}"
+        workspace = Path(settings.BUGPILOT_WORKSPACE_ROOT) / str(run.pk) / f"attempt-{saved_attempt}"
         if not workspace.is_dir():
             raise IntegrationError("The validated publication workspace is missing. Restore it before retrying; no new model run was started.")
-        stage(run, "validating", "Recovering the existing fix and rechecking its source and tests before retrying publication.")
+        if automatic_validation(run.repository):
+            stage(run, "preparing_validation", "Refreshing the saved patch's automatic test environment before revalidation.")
+            prepare_automatic_validation(run.repository, workspace, on_progress=lambda message: stage(run, "preparing_validation", message))
+        stage(run, "validating", "Recovering the saved patch and rechecking its source and tests without repeating model calls.")
         try:
-            run.validation = execution.validate_proposal(run, workspace)
+            run.validation = execution.validate_proposal(run, workspace, on_progress=lambda message: stage(run, "validating", message))
             if run.validation.get("passed") is not True:
                 raise IntegrationError("The recovered fix did not pass validation. No code was pushed.")
         except IntegrationError as error:
-            run.validation = {"passed": False, "reason": execution.redact(str(error))}
+            run.validation = getattr(error, "validation", None) or {"passed": False, "reason": execution.redact(str(error))}
+            run.validation["workspace_attempt"] = saved_attempt
             run.save(update_fields=["validation", "updated_at"])
             raise
-        run.save(update_fields=["validation", "updated_at"])
+        run.publication_attempt = saved_attempt
+        run.save(update_fields=["validation", "publication_attempt", "updated_at"])
         publish_validated_fix(run, workspace, github)
 
     if not run.pull_request_url:
@@ -158,11 +166,11 @@ def run_live(run):
         run.save(update_fields=["proposal", "model_calls", "updated_at"])
         stage(run, "validating", "Running configured checks in resource-limited containers without network access.")
         try:
-            run.validation = execution.validate_proposal(run, workspace)
+            run.validation = execution.validate_proposal(run, workspace, on_progress=lambda message: stage(run, "validating", message))
             if run.validation.get("passed") is not True:
                 raise IntegrationError(run.validation.get("reason") or "Validation did not pass. No pull request was created.")
         except IntegrationError as error:
-            run.validation = {"passed": False, "reason": execution.redact(str(error))}
+            run.validation = getattr(error, "validation", None) or {"passed": False, "reason": execution.redact(str(error))}
             run.save(update_fields=["validation", "updated_at"])
             raise
         run.save(update_fields=["validation", "updated_at"])

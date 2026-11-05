@@ -3,6 +3,7 @@
 Repository commands only execute inside Docker. Build contexts contain the Git
 snapshot, never the worker's environment, Git credentials or untracked files.
 """
+import ast
 import configparser
 import hashlib
 import io
@@ -13,7 +14,9 @@ import tarfile
 import tempfile
 import time
 import tomllib
+import uuid
 from dataclasses import dataclass
+from itertools import chain, islice
 from pathlib import Path, PurePosixPath
 
 from django.conf import settings
@@ -25,6 +28,11 @@ from .integrations import IntegrationError
 AUTO_IMAGE_PREFIX = "bugpilot-auto-"
 CONTEXT_DIR = ".bugpilot-runtime"
 UV_VERSION = "0.13.6"
+TORCH_CPU_VERSION = "2.9.1+cpu"
+TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+PYTHON_REQUIREMENTS = ("requirements.txt", "requirements-dev.txt", "requirements-test.txt", "requirements-tests.txt",
+                       "test-requirements.txt", "requirements/dev.txt", "requirements/test.txt", "requirements/tests.txt",
+                       "test/requirements.txt", "tests/requirements.txt")
 
 
 def automatic_validation(repository):
@@ -37,6 +45,7 @@ class ValidationPlan:
     commands: list
     dockerfile: str
     npmrc: str = ""
+    python_collection: bool = False
 
 
 def read_file(workspace, name):
@@ -95,6 +104,40 @@ def pnpm_workspace_config(workspace):
             raise IntegrationError(f"Unsupported value for pnpm setting '{key}'. Configure a custom test image in Repositories.")
         settings[key] = value
     return "".join(f"{key}={value}\n" for key, value in sorted(settings.items()))
+
+
+def python_test_files(workspace):
+    patterns = ("test_*.py", "*_test.py", "conftest.py")
+    return islice(chain.from_iterable(
+        (directory.rglob(pattern) if recursive else directory.glob(pattern))
+        for directory, recursive in ((workspace, False), (workspace / "test", True), (workspace / "tests", True))
+        for pattern in patterns), 200)
+
+
+def tests_import_torch(workspace):
+    """Recognize a known dependency from a required import, without running source."""
+    for path in python_test_files(workspace):
+        try:
+            tree = ast.parse(read_file(workspace, path.relative_to(workspace).as_posix()))
+        except (IntegrationError, OSError, UnicodeError, SyntaxError, RecursionError, ValueError):
+            continue  # Collection gives the actual error if the file cannot be loaded.
+        for node in tree.body:
+            if isinstance(node, ast.Import) and any(alias.name.split(".")[0] == "torch" for alias in node.names):
+                return True
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and (node.module or "").split(".")[0] == "torch":
+                return True
+    return False
+
+
+def torch_cpu_fallback(pip):
+    # Probe in the prepared interpreter, after declared dependencies were
+    # installed. Never replace an existing torch installation or infer unknown
+    # package names from imports. Run only during the online image build.
+    args = [*pip, "--index-url", TORCH_CPU_INDEX, f"torch=={TORCH_CPU_VERSION}"]
+    script = ("from importlib.util import find_spec\nfrom subprocess import check_call\n"
+              "if find_spec('torch') is None:\n"
+              f"    check_call({args!r})\n")
+    return "RUN " + json.dumps(["python", "-c", script]) + "\n"
 
 
 def python_validation(workspace, metadata, requirements, common):
@@ -156,7 +199,10 @@ def python_validation(workspace, metadata, requirements, common):
         if packaged:
             install += "RUN " + json.dumps([*pip, "-e", f".[{test_extra}]" if test_extra else "."]) + "\n"
         label = "Python (pytest)"
-    return ValidationPlan(label, [["python", "-m", "pytest"]], f"FROM python:{version}-bookworm\n" + common + install)
+    if not (workspace / "uv.lock").is_file() and tests_import_torch(workspace):
+        install += torch_cpu_fallback(pip)
+    return ValidationPlan(label, [["python", "-m", "pytest"]], f"FROM python:{version}-bookworm\n" + common + install,
+                          python_collection=True)
 
 
 def detect_validation(workspace):
@@ -206,12 +252,16 @@ def detect_validation(workspace):
         install += "RUN " + json.dumps(args) + "\n"
         if python_packages:
             install += "RUN " + json.dumps(["python", "-m", "pip", "install", "--no-cache-dir", *python_packages]) + "\n"
+        from .validation_profiles import node_runtime_additions
+        additions = node_runtime_additions(workspace)
+        install += additions
         npmrc = pnpm_workspace_config(workspace) if tool == "pnpm" else ""
-        return ValidationPlan(f"Node.js ({tool} test)", [[tool, "test"]], base + common + install, npmrc)
+        label = f"Node.js ({tool} test)" + (" with freeCodeCamp curriculum/browser setup" if additions else "")
+        return ValidationPlan(label, [[tool, "test"]], base + common + install, npmrc)
 
     pyproject = read_file(workspace, "pyproject.toml")
-    requirements = [name for name in ("requirements.txt", "requirements-dev.txt", "requirements-test.txt") if (workspace / name).is_file()]
-    if pyproject or requirements or (workspace / "setup.py").is_file() or (workspace / "setup.cfg").is_file() or (workspace / "pytest.ini").is_file() or any((workspace / "tests").glob("test*.py")) or any(workspace.glob("test_*.py")):
+    requirements = [name for name in PYTHON_REQUIREMENTS if (workspace / name).is_file()]
+    if pyproject or requirements or (workspace / "setup.py").is_file() or (workspace / "setup.cfg").is_file() or (workspace / "pytest.ini").is_file() or next(python_test_files(workspace), None):
         try:
             metadata = tomllib.loads(pyproject) if pyproject else {}
         except ValueError:
@@ -305,6 +355,36 @@ def build_test_image(image, context, *, on_progress=None):
             wait_for_builder(deadline)
 
 
+def verify_python_collection(image, *, workspace=None, on_progress=None):
+    """Check the clean image snapshot in the same sandbox used for validation."""
+    try:
+        execution.run_container_check(image, ["python", "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
+            name=f"bugpilot-python-collection-{uuid.uuid4().hex}", label="Python test collection", on_progress=on_progress)
+    except IntegrationError as error:
+        check = getattr(error, "check_result", {})
+        if check.get("exit_code") == 5 and check.get("phase") == "tests" and not (check.get("timed_out") or check.get("oom_killed")):
+            if on_progress:
+                on_progress("The base checkout has no tests to collect. The proposed fix must add a passing test before publication.")
+            return
+        missing = sorted(set(re.findall(r"ModuleNotFoundError: No module named ['\"]([A-Za-z_][\w.]*)['\"]", check.get("output", ""))))
+        if workspace is not None:
+            missing = [name for name in missing if not any(
+                (directory / name.split(".")[0]).is_dir() or (directory / (name.split(".")[0] + ".py")).is_file()
+                for directory in (workspace, workspace / "src"))]
+        if (not missing and check.get("phase") == "tests" and check.get("exit_code") == 2
+                and not (check.get("timed_out") or check.get("oom_killed"))
+                and re.search(r"\berrors? during collection\b", check.get("output", ""))):
+            if on_progress:
+                on_progress("The base checkout has test collection errors without an identified missing dependency. "
+                            "The proposed fix must resolve them before publication.\n" + check["output"][-1200:])
+            return
+        hint = (" Missing imports: " + ", ".join(missing) + ". Declare their packages in the repository's test dependencies,"
+                " or configure a prepared test image in Repositories." if missing else " Check the repository's test setup and configuration.")
+        raise IntegrationError(f"Python test collection failed during environment preparation.{hint}\n{error}") from None
+    if on_progress:
+        on_progress("Python tests collect successfully in the offline environment.")
+
+
 def prepare_automatic_validation(repository, workspace, *, on_progress=None):
     """Publish configuration only after an image is actually ready locally."""
     plan = detect_validation(workspace)
@@ -344,6 +424,8 @@ def prepare_automatic_validation(repository, workspace, *, on_progress=None):
         # A successful CLI exit alone is insufficient (e.g. a remote-only builder).
         if execution.command(["docker", "image", "inspect", "--format", "{{.Os}}", image], timeout=15) != "linux":
             raise IntegrationError("The automatic test image was not loaded into the local Linux engine. Check the Docker builder configuration.")
+    if plan.python_collection:
+        verify_python_collection(image, workspace=workspace, on_progress=on_progress)
     repository.runtime_image = image
     repository.validation_commands = plan.commands
     repository.save(update_fields=["runtime_image", "validation_commands"])
